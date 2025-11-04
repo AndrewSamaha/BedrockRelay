@@ -1,0 +1,94 @@
+# BedrockRelay Database Design Rules
+
+## Database Architecture
+
+### PostgreSQL Setup
+- Use PostgreSQL for storing packets flowing through the relay
+- Use Docker Compose to spin up Postgres container
+- Store DDL files in `.ddl/` directory
+- Use a script to load DDL on first database run (not migrations system)
+- No migrations system currently - manual DDL changes only
+
+### Database Library
+- Use `pg` library (low-level PostgreSQL client)
+- **DO NOT** use an ORM
+- Use `pg.Pool` for connection pooling
+- Database code should live in `src/lib/db/` module
+
+### Schema Design
+
+#### Sessions Table
+- `id`: INT PRIMARY KEY AUTO_INCREMENT (auto-increment integer)
+- `started_at`: TIMESTAMP/DATETIME (when session started)
+- `ended_at`: TIMESTAMP/DATETIME (when session ended, nullable)
+
+#### Packets Table
+- `id`: Primary key (auto-increment or UUID - TBD)
+- `session_id`: INT (foreign key to sessions.id)
+- `ts`: TIMESTAMP (when packet was stored)
+- `session_time_ms`: BIGINT (session time in milliseconds)
+- `packet_number`: BIGINT
+- `server_version`: VARCHAR (semver format)
+- `packet`: JSONB (the packet JSON object)
+- `direction`: VARCHAR (packet direction: 'clientbound' or 'serverbound')
+
+### Database Operations
+
+#### Write Strategy
+- **Fire-and-forget**: All database writes must be async and non-blocking
+- Writes should not block packet forwarding
+- Use try-catch to log errors but continue processing
+- No retry logic needed (fire-and-forget)
+
+#### Connection Management
+- Use `pg.Pool` for connection pooling
+- Configure pool size based on expected packet volume
+- Implement graceful shutdown: close DB connections on process termination
+- Handle connection errors gracefully (log and continue, don't crash)
+
+#### Session Tracking
+- Create new session record when connection opens (on 'connect' event)
+- Update session's `ended_at` when connection closes/disconnects
+- Use auto-increment integer IDs for sessions
+
+### File Organization
+
+#### DDL Files
+- Store all DDL in `.ddl/` directory
+- Script should check if tables exist before running DDL (first-run detection)
+- DDL should create both `sessions` and `packets` tables with appropriate indexes
+
+#### Database Module
+- All database code in `src/lib/db/`
+- Separate connection setup, write functions, and cleanup logic
+- Export clean API for packet writes and session management
+
+### Environment Variables
+- Database connection uses environment variables: `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`
+- Docker Compose uses `DB_PORT` environment variable for host port mapping (defaults to 5432)
+- Use `getConnectionString()` from `src/lib/db/config.js` to build connection strings
+- Default values: host=localhost, port=5432, user=postgres, password=postgres, database=postgres
+
+### Implementation Requirements
+
+#### Initialization
+- Docker Compose should set up Postgres container
+- Include initialization script that runs DDL on first database start
+- Script should detect first run (check if tables exist)
+- Docker Compose port mapping uses `${DB_PORT:-5432}:5432` format for configurable host port
+
+#### Error Handling
+- Database write failures should be logged but not block packet processing
+- Connection failures should be logged
+- Application should continue running even if database is unavailable
+
+#### Shutdown
+- Implement graceful shutdown handler
+- Close database pool connections on process termination
+- Ensure in-flight writes complete or are properly cancelled
+
+### Future Considerations (Not Implemented Yet)
+- No migrations system (manual DDL only for now)
+- No data retention/cleanup policies yet
+- Indexes will be added based on query patterns
+- No partitioning strategy yet (may be needed for high volume)
