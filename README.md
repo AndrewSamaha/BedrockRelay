@@ -43,7 +43,21 @@ pnpm viewer
 pnpm --filter @bedrockrelay/lazypacket start
 ```
 
-**Note:** The viewer loads environment variables from the `.env` file in the project root. Make sure your `.env` file contains the database connection settings (`DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`).
+**Environment Variables:**
+
+The viewer loads environment variables from the `.env` file in the project root. The Rust binary uses the `dotenv` crate to automatically search for `.env` files in multiple locations:
+1. Current working directory (`.env`)
+2. Two levels up (`../../.env`) - project root when running from `apps/lazypacket/`
+3. One level up (`../.env`) - project root when running from project root
+
+Make sure your `.env` file contains the database connection settings:
+- `DB_HOST` (default: localhost)
+- `DB_PORT` (default: 5432)
+- `DB_USER` (default: postgres)
+- `DB_PASSWORD` (default: postgres)
+- `DB_NAME` (default: postgres)
+
+The viewer will show helpful error messages if the database connection fails, including which connection parameters were used.
 
 **Build:**
 ```bash
@@ -74,9 +88,9 @@ pnpm install
 docker compose up -d
 ```
 
-3. Configure environment variables (create `.env` file):
+3. Configure environment variables (create `.env` file at project root):
 ```bash
-# Database
+# Database (used by both relay and viewer)
 DB_HOST=localhost
 DB_PORT=5432
 DB_USER=postgres
@@ -90,6 +104,10 @@ PROXY_LISTENING_PORT=19131
 PROXY_DESTINATION_ADDRESS=192.168.1.100
 PROXY_DESTINATION_PORT=19132
 ```
+
+**Note:** Both the relay and viewer load the `.env` file from the project root:
+- **Relay**: Explicitly loads `../../.env` relative to `apps/relay/relay.js`
+- **Viewer**: Uses `dotenv` crate to search multiple locations (current dir, `../../.env`, `../.env`)
 
 ### Available Scripts
 

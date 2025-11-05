@@ -63,12 +63,6 @@
 - Separate connection setup, write functions, and cleanup logic
 - Export clean API for packet writes and session management
 
-### Environment Variables
-- Database connection uses environment variables: `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`
-- Docker Compose uses `DB_PORT` environment variable for host port mapping (defaults to 5432)
-- Use `getConnectionString()` from `src/lib/db/config.js` to build connection strings
-- Default values: host=localhost, port=5432, user=postgres, password=postgres, database=postgres
-
 ### Implementation Requirements
 
 #### Initialization
@@ -86,6 +80,27 @@
 - Implement graceful shutdown handler
 - Close database pool connections on process termination
 - Ensure in-flight writes complete or are properly cancelled
+
+### Environment Variables
+
+#### Relay Server (JavaScript)
+- Database connection uses environment variables: `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`
+- Docker Compose uses `DB_PORT` environment variable for host port mapping (defaults to 5432)
+- Use `getConnectionString()` from `src/lib/db/config.js` to build connection strings
+- Default values: host=localhost, port=5432, user=postgres, password=postgres, database=postgres
+- The relay's `relay.js` explicitly loads `.env` from the project root using `dotenv.config({ path: rootEnvPath })` where `rootEnvPath` is resolved as `../../.env` relative to `apps/relay/relay.js`
+
+#### Lazypacket Viewer (Rust)
+- The lazypacket Rust viewer uses the `dotenv` crate to load environment variables
+- The viewer searches for `.env` files in multiple locations (in order):
+  1. Current working directory (`.env`)
+  2. Two levels up (`../../.env`) - project root when running from `apps/lazypacket/`
+  3. One level up (`../.env`) - project root when running from project root
+- The `.env` file should be located at the project root (same location as the relay's `.env`)
+- Database connection settings are loaded from the `.env` file: `DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`
+- If database connection fails, error messages include the connection parameters used to help debug
+- The viewer's database connection code is in `apps/lazypacket/src/db.rs`
+- The `.env` loading happens in `apps/lazypacket/src/viewer.rs` in the `main()` function before database connection
 
 ### Future Considerations (Not Implemented Yet)
 - No migrations system (manual DDL only for now)
