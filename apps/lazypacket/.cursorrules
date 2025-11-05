@@ -1,0 +1,149 @@
+# Bedrock Rust Proxy - Cursor Rules
+
+## Project Overview
+
+This project implements a Minecraft Bedrock Edition proxy in Rust that:
+- Intercepts and forwards packets between clients and servers
+- Logs all packets in binary format (one file per session)
+- Provides a terminal-based viewer for browsing and analyzing packet logs
+- Supports protocol decoding to show human-readable packet information
+
+## Key Requirements
+
+1. **Proxy Functionality**
+   - UDP-based packet forwarding between client and upstream server
+   - Session management (one log file per client session)
+   - Binary packet logging with protocol version tracking
+
+2. **Packet Logging**
+   - One binary file per session (UUID-based naming)
+   - Length-prefixed bincode serialization format
+   - Protocol version stored with each packet
+   - Uncompressed format (compression removed per user request)
+
+3. **Packet Viewer**
+   - Terminal UI (ratatui + crossterm)
+   - Session log browsing
+   - Packet navigation with timeline visualization
+   - Scrollable packet details panel
+   - JSON and hex view modes
+   - Protocol version display
+   - Packet name and ID identification
+
+4. **Protocol Decoding**
+   - Load protocol definitions from minecraft-data (proto.yml format)
+   - Extract packet IDs using varint decoding
+   - Identify packet names from protocol definitions
+   - Display decoded packet information in viewer
+
+## Technology Stack
+
+- **Async Runtime**: `tokio` with full features
+- **Serialization**: `bincode` for binary logs, `serde_json` for JSON output
+- **Terminal UI**: `ratatui` (formerly tui-rs) and `crossterm`
+- **Protocol Parsing**: `serde_yaml` for YAML protocol definitions
+- **Error Handling**: `anyhow` for context-rich errors, `thiserror` for error types
+- **Logging**: `tracing` and `tracing-subscriber` with env-filter support
+- **Network**: Native UDP sockets with `tokio::net::UdpSocket`
+
+## Architecture Patterns
+
+### UDP Proxy Architecture
+- **Single Socket Approach**: Use one `Arc<UdpSocket>` for both client and upstream communication
+- **Address-Based Dispatch**: Route packets based on source address (client vs upstream)
+- **Correct UDP Usage**: Always use `send_to()` with explicit destination address, never `send()` or `connect()`
+
+### Packet Logging
+- **Format**: `[u32 length (little-endian)][bincode-serialized PacketEntry]`
+- **Session Management**: UUID-based session IDs, one logger per session
+- **Protocol Versioning**: Store protocol version with each packet for compatibility
+
+### Protocol Parsing
+- **Definition Source**: Extract from `minecraft-data` npm package (proto.yml files)
+- **Parser Structure**: Load once at viewer startup, reuse for all packets
+- **Graceful Degradation**: Viewer works even if protocol parser fails to load
+
+### Terminal UI
+- **State Management**: Clear separation between session list and packet view modes
+- **Scroll Management**: Track scroll state per-packet, reset on navigation
+- **Focus Management**: Removed (simplified to direct key controls per panel)
+- **Error Display**: In-app error messages shown in UI
+
+## Debugging Patterns and Best Practices
+
+### Error Visibility
+- Always log errors with context using `anyhow::Context`
+- Default log level is INFO if `RUST_LOG` not set
+- Use `debug!` for verbose packet activity, `info!` for important events
+- Display errors in UI when appropriate (e.g., viewer error messages)
+
+### Network Debugging
+- **Socket Simplification**: Single UDP socket approach simplifies forwarding
+- **UDP Socket Methods**: Always use `send_to()` with explicit address, never `connect()` or `send()` on UDP sockets
+- **Error Context**: Include socket addresses and packet sizes in error messages
+
+### Binary Data Handling
+- **Length Prefixes**: Always prefix serialized data with length for reliable deserialization
+- **Format Versioning**: Support both old and new log formats with fallback parsing
+- **Sanity Checks**: Validate length prefixes (max size, remaining data availability)
+
+### Protocol Parsing
+- **Graceful Loading**: Protocol parser should fail gracefully if definition files missing
+- **Version Matching**: Use closest available protocol version if exact match unavailable
+- **Varint Parsing**: Implement proper varint decoding for packet IDs (support multi-byte)
+
+### Code Organization
+- **Module Structure**: Separate concerns (proxy, session, packet_logger, protocol, viewer)
+- **Binary Targets**: Use separate binaries for different tools (viewer, log_reader, main proxy)
+- **Library Code**: Shared code (packet_logger, protocol) accessible via lib.rs
+
+### Testing Approach
+- **Incremental Testing**: Test each component as features are added
+- **Error Handling**: Tests should verify graceful error handling
+- **Backward Compatibility**: Always test with old log formats when making changes
+
+## Development Workflow
+
+### Adding Protocol Support
+1. Extract protocol definitions from minecraft-data to `data/protocol/`
+2. Update `ProtocolParser` to handle new version
+3. Test packet ID extraction and name lookup
+4. Implement field decoding incrementally (simple types first)
+
+### Adding Viewer Features
+1. Update `ViewerApp` state structure
+2. Modify rendering functions for new UI elements
+3. Add keyboard handlers for new controls
+4. Test scrolling and navigation edge cases
+
+### Logging Format Changes
+1. Add new fields to `PacketEntry` with `#[serde(default)]` for backward compatibility
+2. Update log reading code to handle both old and new formats
+3. Test with existing log files to ensure compatibility
+
+## Configuration
+
+### Environment Variables
+- `RUST_LOG`: Controls log verbosity (defaults to "info" if not set)
+  - Examples: `RUST_LOG=debug`, `RUST_LOG=bedrock_rust_proxy=debug`
+
+### Default Settings
+- Protocol version: 1.21.111 (closest to target 1.21.113)
+- Log directory: `logs/`
+- Proxy listen address: `0.0.0.0:19332`
+- Upstream address: `192.168.1.100:19132` (configurable)
+
+## Current Limitations
+
+1. **Protocol Decoding**: Only packet identification works (name/ID), field decoding not yet implemented
+2. **RakNet Headers**: Packet ID extraction assumes raw packet data, doesn't parse RakNet headers
+3. **Multiple Versions**: Only one protocol version supported at a time
+4. **YAML Parsing**: Some edge cases in proto.yml parsing may need refinement
+
+## Future Enhancements
+
+1. Full packet field decoding with all type support
+2. Multiple protocol version support with automatic matching
+3. Packet filtering and search capabilities
+4. Protocol-aware packet validation
+5. Export functionality for decoded packets

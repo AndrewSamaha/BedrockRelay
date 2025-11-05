@@ -54,7 +54,7 @@
 ### File Organization
 
 #### DDL Files
-- Store all DDL in `.ddl/` directory
+- Store all DDL in `apps/relay/.ddl/` directory
 - Script should check if tables exist before running DDL (first-run detection)
 - DDL should create both `sessions` and `packets` tables with appropriate indexes
 

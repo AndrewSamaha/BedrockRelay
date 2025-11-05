@@ -1,6 +1,14 @@
 process.env.DEBUG = 'minecraft-protocol'
 
-import 'dotenv/config';
+import dotenv from 'dotenv';
+import { fileURLToPath } from 'url';
+import { dirname, resolve } from 'path';
+
+// Load .env from project root (two levels up from apps/relay/)
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const rootEnvPath = resolve(__dirname, '../../.env');
+dotenv.config({ path: rootEnvPath });
 
 import bedrockProtocol from 'bedrock-protocol';
 const { Relay } = bedrockProtocol;

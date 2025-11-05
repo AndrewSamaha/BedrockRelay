@@ -1,0 +1,19 @@
+# Ignore all log files but keep the logs directory
+logs/*
+!logs/.gitkeep
+
+# Rust build artifacts
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db

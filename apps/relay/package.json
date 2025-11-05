@@ -1,0 +1,23 @@
+{
+  "name": "@bedrockrelay/relay",
+  "version": "1.0.0",
+  "description": "Minecraft Bedrock relay server that captures and saves packets to PostgreSQL",
+  "type": "module",
+  "main": "relay.js",
+  "scripts": {
+    "start": "node ./relay.js",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "bedrock-protocol": "^3.49.0",
+    "dotenv": "^17.2.3",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.8.0",
+    "@types/pg": "^8.11.10",
+    "typescript": "^5.9.3",
+    "vitest": "^2.1.8"
+  }
+}

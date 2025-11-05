@@ -1,29 +1,22 @@
 {
-  "name": "BedrockProxy",
+  "name": "bedrockrelay",
   "version": "1.0.0",
-  "description": "",
-  "type": "module",
-  "main": "relay.js",
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "description": "Monorepo for BedrockRelay - Minecraft Bedrock packet relay and inspection tools",
+  "private": true,
   "packageManager": "pnpm@10.18.2",
-  "dependencies": {
-    "bedrock-protocol": "^3.49.0",
-    "dotenv": "^17.2.3",
-    "pg": "^8.13.1"
-  },
-  "devDependencies": {
-    "@types/node": "^24.8.0",
-    "@types/pg": "^8.11.10",
-    "typescript": "^5.9.3",
-    "vitest": "^2.1.8"
-  },
   "scripts": {
     "preinstall": "npx only-allow pnpm",
-    "start": "node ./relay.js",
-    "test": "vitest run",
-    "test:watch": "vitest",
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "start": "turbo run start",
+    "start:relay": "turbo run start --filter=@bedrockrelay/relay",
     "db:wipe": "docker compose down --volumes --remove-orphans"
+  },
+  "devDependencies": {
+    "turbo": "^2.3.3"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "pnpm": ">=8.0.0"
   }
 }
