@@ -204,6 +204,7 @@ async fn main() -> Result<()> {
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
+    terminal.clear()?; // Clear the screen before drawing
 
     let mut app = ViewerApp::new().await?;
     let mut should_quit = false;
