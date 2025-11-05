@@ -10,6 +10,9 @@
     "test": "turbo run test",
     "start": "turbo run start",
     "start:relay": "turbo run start --filter=@bedrockrelay/relay",
+    "start:viewer": "turbo run start --filter=@bedrockrelay/lazypacket",
+    "viewer": "pnpm --filter @bedrockrelay/lazypacket start",
+    "viewer:dev": "pnpm --filter @bedrockrelay/lazypacket dev",
     "db:wipe": "docker compose down --volumes --remove-orphans"
   },
   "devDependencies": {

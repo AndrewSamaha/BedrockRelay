@@ -1,5 +1,6 @@
 mod packet_logger;
 mod protocol;
+mod db;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -16,203 +17,65 @@ use ratatui::{
     Frame, Terminal,
 };
 use serde_json;
-use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
-use uuid::Uuid;
+use db::{Database, Session as DbSession};
 
 struct SessionLog {
-    path: PathBuf,
-    session_id: Uuid,
+    session_id: i32,
     packets: Vec<PacketEntry>,
     start_time: i64,
     protocol_version: Option<String>,
 }
 
 impl SessionLog {
-    fn load(path: PathBuf) -> Result<Self> {
-        // Try to parse session ID from filename
-        let filename = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .context("Invalid log filename")?;
-        
-        // Filename should be the session ID
-        let session_id = Uuid::parse_str(filename)
-            .context("Failed to parse session ID from filename")?;
+    async fn load(db: &Database, session_id: i32) -> Result<Self> {
+        let db_packets = db.get_packets(session_id).await?;
 
-        // Read log file (uncompressed)
-        let data = fs::read(&path)
-            .context("Failed to read log file")?;
+        if db_packets.is_empty() {
+            return Err(anyhow::anyhow!("No packets found for session {}", session_id));
+        }
 
-        // Deserialize all packets
-        // First, try new format: [u32 length][bincode serialized PacketEntry]
-        // If that fails, try old format: just bincode serialized PacketEntry entries back-to-back
-        use std::io::{Cursor, Read};
-        let mut cursor = Cursor::new(&data);
         let mut packets = Vec::new();
         let mut start_time = None;
         let mut protocol_version = None;
-        
-        // Try new format first (with length prefix)
-        loop {
-            let position = cursor.position() as usize;
-            
-            // Check if we're at the end (need at least 4 bytes for length prefix)
-            if data.len().saturating_sub(position) < 4 {
-                break;
-            }
-            
-            // Read the length prefix (4 bytes, little-endian u32)
-            let mut len_bytes = [0u8; 4];
-            if cursor.read_exact(&mut len_bytes).is_err() {
-                break; // End of file
-            }
-            
-            let entry_len = u32::from_le_bytes(len_bytes) as usize;
-            
-            // Sanity check: entry_len should be reasonable
-            // - Must be > 0
-            // - Must be <= 10MB (reasonable max packet size)
-            // - Must fit in remaining data
-            let current_position = cursor.position() as usize;
-            let remaining = data.len().saturating_sub(current_position);
-            
-            if entry_len == 0 || entry_len > 10_000_000 || entry_len > remaining {
-                // This doesn't look like a valid length prefix - might be old format
-                cursor.set_position(position as u64);
-                break;
-            }
-            
-            // Read the serialized entry
-            let mut entry_data = vec![0u8; entry_len];
-            if cursor.read_exact(&mut entry_data).is_err() {
-                cursor.set_position(position as u64);
-                break;
-            }
-            
-            // Deserialize the entry
-            match bincode::deserialize::<PacketEntry>(&entry_data) {
-                Ok(entry) => {
-                    if start_time.is_none() {
-                        start_time = Some(entry.timestamp);
-                    }
-                    // Extract protocol version from first packet that has it
-                    if protocol_version.is_none() && entry.protocol_version.is_some() {
-                        protocol_version = entry.protocol_version.clone();
-                    }
-                    packets.push(entry);
+
+        for db_packet in db_packets {
+            // Convert database packet to PacketEntry
+            let direction = match db_packet.direction.as_str() {
+                "clientbound" => PacketDirection::Clientbound,
+                "serverbound" => PacketDirection::Serverbound,
+                _ => {
+                    return Err(anyhow::anyhow!("Invalid direction: {}", db_packet.direction));
                 }
-                Err(_) => {
-                    // Deserialization failed - this might be old format
-                    if !packets.is_empty() {
-                        // We've read some packets successfully, stop here
-                        break;
-                    }
-                    // Reset and try old format
-                    cursor.set_position(position as u64);
-                    break;
-                }
+            };
+
+            // Convert timestamp to milliseconds since epoch
+            let timestamp_ms = db_packet.ts.timestamp_millis();
+
+            // Track start time (first packet's timestamp)
+            if start_time.is_none() {
+                start_time = Some(timestamp_ms);
             }
-        }
-        
-        // If we didn't read any packets with the new format, try old format
-        // Old format: entries are written sequentially with bincode::serialize()
-        // Bincode writes entries back-to-back, so we need to read them one at a time
-        // The tricky part is that bincode doesn't know where entries end, so we use
-        // deserialize_from which reads exactly one entry
-        if packets.is_empty() && data.len() > 0 {
-            cursor.set_position(0);
-            
-            // Try reading entries one at a time
-            // Bincode's deserialize_from will read exactly one entry and stop
-            let mut last_success_pos = 0;
-            
-            while (cursor.position() as usize) < data.len() {
-                let pos_before = cursor.position() as usize;
-                
-                // Try to deserialize one entry from current position
-                match bincode::deserialize_from::<_, PacketEntry>(&mut cursor) {
-                    Ok(entry) => {
-                        let pos_after = cursor.position() as usize;
-                        
-                        // Check if we actually advanced (read some data)
-                        if pos_after > pos_before {
-                            if start_time.is_none() {
-                                start_time = Some(entry.timestamp);
-                            }
-                            packets.push(entry);
-                            last_success_pos = pos_after;
-                            
-                            // If we've consumed all data, we're done
-                            if pos_after >= data.len() {
-                                break;
-                            }
-                        } else {
-                            // Didn't advance - something wrong, stop
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        // Deserialization failed
-                        // If we've read some packets, we're probably done
-                        if !packets.is_empty() {
-                            // We successfully read some packets, stop here
-                            break;
-                        }
-                        
-                        // If we haven't read anything yet, check if this looks like new format
-                        // by checking if first 4 bytes could be a valid length prefix
-                        cursor.set_position(0);
-                        let first_four = if data.len() >= 4 {
-                            u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize
-                        } else {
-                            0
-                        };
-                        
-                        // If first 4 bytes look like a reasonable length (and we have that much data),
-                        // this is probably a new format file that failed validation
-                        if first_four > 0 && first_four <= data.len() && first_four <= 10_000_000 {
-                            return Err(anyhow::anyhow!(
-                                "File appears to be in new format (with length prefixes) but failed to read. First length value: {} bytes, file size: {} bytes. Error: {}",
-                                first_four,
-                                data.len(),
-                                e
-                            ));
-                        }
-                        
-                        // Otherwise, it's probably corrupted or wrong format
-                        return Err(anyhow::anyhow!(
-                            "Failed to read any packets. File may be corrupted, empty, or in an unsupported format. File size: {} bytes. Error: {}",
-                            data.len(),
-                            e
-                        ));
-                    }
-                }
+
+            // Extract protocol version from first packet
+            if protocol_version.is_none() {
+                protocol_version = Some(db_packet.server_version.clone());
             }
-        }
-        
-        // If we still have no packets, provide a detailed error
-        if packets.is_empty() {
-            // Check if file might be empty or very small
-            if data.len() < 4 {
-                return Err(anyhow::anyhow!(
-                    "Log file is too small ({} bytes) to contain any packets",
-                    data.len()
-                ));
-            }
-            
-            // Show first few bytes for debugging
-            let preview = data.iter().take(16).map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ");
-            return Err(anyhow::anyhow!(
-                "No packets found in log file. File size: {} bytes. First 16 bytes (hex): {}",
-                data.len(),
-                preview
-            ));
+
+            // Serialize the JSON packet to bytes for compatibility with existing code
+            // The packet field contains the JSON packet data
+            let data = serde_json::to_vec(&db_packet.packet)
+                .context("Failed to serialize packet to JSON")?;
+
+            packets.push(PacketEntry {
+                timestamp: timestamp_ms,
+                direction,
+                data,
+                protocol_version: Some(db_packet.server_version),
+            });
         }
 
         Ok(Self {
-            path,
             session_id,
             packets,
             start_time: start_time.unwrap_or(0),
@@ -226,8 +89,8 @@ impl SessionLog {
 }
 
 struct ViewerApp {
-    logs_dir: PathBuf,
-    sessions: Vec<(PathBuf, Uuid, usize)>, // path, session_id, packet_count
+    db: Database,
+    sessions: Vec<(DbSession, usize)>, // session, packet_count
     selected_session: usize,
     current_log: Option<SessionLog>,
     packet_index: usize,
@@ -244,44 +107,23 @@ enum ViewerMode {
 }
 
 impl ViewerApp {
-    fn new() -> Result<Self> {
-        let logs_dir = PathBuf::from("logs");
+    async fn new() -> Result<Self> {
+        let db = Database::connect().await?;
         
-        // Scan for log files
+        // Load sessions from database
+        let db_sessions = db.get_sessions().await?;
         let mut sessions = Vec::new();
-        if logs_dir.exists() {
-            for entry in fs::read_dir(&logs_dir)? {
-                let entry = entry?;
-                let path = entry.path();
-                
-                // Check if it's a log file (.bin)
-                if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
-                    if ext == "bin" {
-                        // Try to parse session ID from filename
-                        if let Some(filename) = path.file_stem().and_then(|s| s.to_str()) {
-                            if let Ok(session_id) = Uuid::parse_str(filename) {
-                                // Quick count of packets (approximate)
-                                let packet_count = Self::estimate_packet_count(&path).unwrap_or(0);
-                                sessions.push((path, session_id, packet_count));
-                            }
-                        }
-                    }
-                }
-            }
-        }
         
-        // Sort by modification time (newest first)
-        sessions.sort_by(|a, b| {
-            let time_a = fs::metadata(&a.0).and_then(|m| m.modified()).unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-            let time_b = fs::metadata(&b.0).and_then(|m| m.modified()).unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-            time_b.cmp(&time_a)
-        });
+        for session in db_sessions {
+            let packet_count = db.get_session_packet_count(session.id).await?;
+            sessions.push((session, packet_count));
+        }
 
         // Try to load protocol parser for default version
         let protocol_parser = protocol::ProtocolParser::new("1.21.111").ok();
         
         Ok(Self {
-            logs_dir,
+            db,
             sessions,
             selected_session: 0,
             current_log: None,
@@ -294,16 +136,9 @@ impl ViewerApp {
         })
     }
 
-    fn estimate_packet_count(path: &Path) -> Result<usize> {
-        // Quick estimate - just check file size
-        let metadata = fs::metadata(path)?;
-        // Rough estimate: average packet entry might be ~100-200 bytes
-        Ok((metadata.len() / 150) as usize)
-    }
-
-    fn load_session(&mut self) -> Result<()> {
-        if let Some((path, _, _)) = self.sessions.get(self.selected_session) {
-            let log = SessionLog::load(path.clone())?;
+    async fn load_session(&mut self) -> Result<()> {
+        if let Some((session, _)) = self.sessions.get(self.selected_session) {
+            let log = SessionLog::load(&self.db, session.id).await?;
             self.current_log = Some(log);
             self.packet_index = 0;
             self.mode = ViewerMode::PacketView;
@@ -318,12 +153,10 @@ impl ViewerApp {
     }
 
     fn prev_packet(&mut self) {
-        if let Some(log) = &self.current_log {
-            if self.packet_index > 0 {
-                self.packet_index -= 1;
-                // Reset scroll when packet changes
-                self.packet_details_scroll = 0;
-            }
+        if self.packet_index > 0 {
+            self.packet_index -= 1;
+            // Reset scroll when packet changes
+            self.packet_details_scroll = 0;
         }
     }
 
@@ -338,14 +171,41 @@ impl ViewerApp {
     }
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Load .env file - try multiple locations
+    // 1. Current working directory
+    // 2. Two levels up (project root when running from apps/lazypacket/)
+    // 3. One level up (when running from project root)
+    let env_locations = [
+        ".env",
+        "../../.env",
+        "../.env",
+    ];
+    
+    let mut loaded = false;
+    for location in &env_locations {
+        let path = std::path::Path::new(location);
+        if path.exists() {
+            if let Ok(_) = dotenv::from_path(path) {
+                loaded = true;
+                break;
+            }
+        }
+    }
+    
+    // Also try dotenv's default behavior (current dir)
+    if !loaded {
+        dotenv::dotenv().ok();
+    }
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut app = ViewerApp::new()?;
+    let mut app = ViewerApp::new().await?;
     let mut should_quit = false;
 
     while !should_quit {
@@ -370,7 +230,7 @@ fn main() -> Result<()> {
                                 }
                                 KeyCode::Enter => {
                                     app.error_message = None;
-                                    if let Err(e) = app.load_session() {
+                                    if let Err(e) = app.load_session().await {
                                         app.error_message = Some(format!("Failed to load session: {}", e));
                                     }
                                 }
@@ -489,8 +349,19 @@ fn render_session_list(f: &mut Frame, app: &ViewerApp) {
     let items: Vec<ListItem> = app
         .sessions
         .iter()
-        .map(|(_path, session_id, packet_count)| {
-            let text = format!("{} ({} packets)", session_id, packet_count);
+        .map(|(session, packet_count)| {
+            let duration = if let Some(ended_at) = session.ended_at {
+                let duration = ended_at - session.started_at;
+                format!("{} packets | {}s", packet_count, duration.num_seconds())
+            } else {
+                format!("{} packets | Active", packet_count)
+            };
+            let text = format!(
+                "Session #{} | Started: {} | {}",
+                session.id,
+                session.started_at.format("%Y-%m-%d %H:%M:%S"),
+                duration
+            );
             ListItem::new(text)
         })
         .collect();
@@ -538,7 +409,7 @@ fn render_packet_view(f: &mut Frame, app: &mut ViewerApp) {
         .map(|v| format!("Protocol: {}", v))
         .unwrap_or_else(|| "Protocol: Unknown".to_string());
     let header_text = format!(
-        "Session: {} | {} | Packet: {}/{} | Time: {} | View: {} | [?/?/h/l: navigate, ?/?/k/j: scroll details, PgUp/PgDn: jump 10, Home/End: first/last, x: view, q: back]",
+        "Session: #{} | {} | Packet: {}/{} | Time: {} | View: {} | [?/?/h/l: navigate, ?/?/k/j: scroll details, PgUp/PgDn: jump 10, Home/End: first/last, x: view, q: back]",
         log.session_id,
         version_str,
         packet_num,

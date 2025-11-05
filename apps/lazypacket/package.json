@@ -1,0 +1,12 @@
+{
+  "name": "@bedrockrelay/lazypacket",
+  "version": "0.1.0",
+  "description": "Rust CLI tool for browsing and introspecting packets stored in PostgreSQL",
+  "private": true,
+  "scripts": {
+    "install": "echo 'Rust package - no npm dependencies to install'",
+    "build": "cargo build --release --bin viewer",
+    "start": "cargo run --release --bin viewer",
+    "dev": "cargo run --bin viewer"
+  }
+}

@@ -12,6 +12,8 @@ importers:
         specifier: ^2.3.3
         version: 2.6.0
 
+  apps/lazypacket: {}
+
   apps/relay:
     dependencies:
       bedrock-protocol:

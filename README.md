@@ -30,20 +30,27 @@ pnpm start:relay
 pnpm --filter @bedrockrelay/relay start
 ```
 
-### `lazypacket`
+### `@bedrockrelay/lazypacket`
 
 Rust-based CLI tool for browsing and introspecting packets stored in PostgreSQL.
 
-**Build:**
+**Start the viewer:**
 ```bash
-cd apps/lazypacket
-cargo build --release
+pnpm start:viewer
+# or
+pnpm viewer
+# or
+pnpm --filter @bedrockrelay/lazypacket start
 ```
 
-**Run:**
+**Note:** The viewer loads environment variables from the `.env` file in the project root. Make sure your `.env` file contains the database connection settings (`DB_HOST`, `DB_PORT`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`).
+
+**Build:**
 ```bash
+pnpm --filter @bedrockrelay/lazypacket build
+# or
 cd apps/lazypacket
-cargo run --release
+cargo build --release --bin viewer
 ```
 
 ## Development
@@ -90,6 +97,8 @@ PROXY_DESTINATION_PORT=19132
 - `pnpm test` - Run tests for all apps
 - `pnpm start` - Start all apps
 - `pnpm start:relay` - Start only the relay server
+- `pnpm start:viewer` or `pnpm viewer` - Start the packet viewer
+- `pnpm viewer:dev` - Start the viewer in dev mode (debug build)
 - `pnpm db:wipe` - Wipe database volumes
 
 ### Turborepo
