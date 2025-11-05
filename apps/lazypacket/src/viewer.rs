@@ -62,8 +62,8 @@ impl SessionLog {
                 protocol_version = Some(db_packet.server_version.clone());
             }
 
-            // Serialize the JSON packet to bytes for compatibility with existing code
-            // The packet field contains the JSON packet data
+            // Store the JSON packet directly for display
+            // Also serialize to bytes for compatibility with hex view and protocol parsing
             let data = serde_json::to_vec(&db_packet.packet)
                 .context("Failed to serialize packet to JSON")?;
 
@@ -72,6 +72,7 @@ impl SessionLog {
                 direction,
                 data,
                 protocol_version: Some(db_packet.server_version),
+                packet_json: Some(db_packet.packet),
             });
         }
 
@@ -452,42 +453,58 @@ fn render_packet_view(f: &mut Frame, app: &mut ViewerApp) {
                 hex_dump(&packet.data, 16)
             )
         } else {
-            // JSON view (default) - try to decode packet if parser is available
-            let mut json_value = serde_json::json!({
-                "direction": direction_str,
-                "timestamp": packet.timestamp,
-                "timestamp_formatted": time_str,
-                "relative_time_ms": log.relative_time(packet.timestamp),
-                "size_bytes": packet.data.len(),
-            });
-            
-            // Try to decode packet using protocol parser
-            if let Some(ref parser) = app.protocol_parser {
-                let decoded = parser.decode_packet(&packet.data, packet.direction);
-                
-                if let Some(packet_name) = decoded.packet_name {
-                    json_value["packet_name"] = serde_json::json!(packet_name);
+            // JSON view (default) - display packet JSON from database
+            if let Some(ref packet_json) = packet.packet_json {
+                // If we have JSON packet from database, display it directly
+                // The packet JSON already contains the packet structure
+                match serde_json::to_string_pretty(packet_json) {
+                    Ok(json_str) => {
+                        // Add metadata header
+                        format!(
+                            "Direction: {}\nTimestamp: {}\nRelative Time: {:.3}s\n\nPacket JSON:\n{}",
+                            direction_str,
+                            time_str,
+                            log.relative_time(packet.timestamp) as f64 / 1000.0,
+                            json_str
+                        )
+                    },
+                    Err(e) => format!("Error formatting JSON: {}", e)
                 }
-                if let Some(packet_id) = decoded.packet_id {
-                    json_value["packet_id"] = serde_json::json!(format!("0x{:02x}", packet_id));
-                }
-                
-                if !decoded.fields.is_empty() {
-                    json_value["decoded_fields"] = serde_json::Value::Object(
-                        decoded.fields.into_iter().map(|(k, v)| (k, v)).collect()
-                    );
-                }
-                
-                // Always include raw data for now
-                json_value["data"] = serde_json::json!(packet.data);
             } else {
-                // No parser available, just show raw data
+                // Fallback: if no JSON packet available (e.g., from binary logs), show metadata and try to decode
+                let mut json_value = serde_json::json!({
+                    "direction": direction_str,
+                    "timestamp": packet.timestamp,
+                    "timestamp_formatted": time_str,
+                    "relative_time_ms": log.relative_time(packet.timestamp),
+                    "size_bytes": packet.data.len(),
+                });
+                
+                // Try to decode packet using protocol parser
+                if let Some(ref parser) = app.protocol_parser {
+                    let decoded = parser.decode_packet(&packet.data, packet.direction);
+                    
+                    if let Some(packet_name) = decoded.packet_name {
+                        json_value["packet_name"] = serde_json::json!(packet_name);
+                    }
+                    if let Some(packet_id) = decoded.packet_id {
+                        json_value["packet_id"] = serde_json::json!(format!("0x{:02x}", packet_id));
+                    }
+                    
+                    if !decoded.fields.is_empty() {
+                        json_value["decoded_fields"] = serde_json::Value::Object(
+                            decoded.fields.into_iter().map(|(k, v)| (k, v)).collect()
+                        );
+                    }
+                }
+                
+                // Include raw data as array for binary format
                 json_value["data"] = serde_json::json!(packet.data);
-            }
-            
-            match serde_json::to_string_pretty(&json_value) {
-                Ok(json_str) => json_str,
-                Err(e) => format!("Error formatting JSON: {}", e)
+                
+                match serde_json::to_string_pretty(&json_value) {
+                    Ok(json_str) => json_str,
+                    Err(e) => format!("Error formatting JSON: {}", e)
+                }
             }
         };
 

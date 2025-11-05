@@ -2,6 +2,7 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use serde::{Serialize, Deserialize};
+use serde_json::Value;
 use uuid::Uuid;
 use chrono::Utc;
 
@@ -15,6 +16,8 @@ pub struct PacketEntry {
     pub data: Vec<u8>,
     #[serde(default)]
     pub protocol_version: Option<String>,
+    #[serde(skip)]
+    pub packet_json: Option<Value>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -66,6 +69,7 @@ impl PacketLogger {
                 direction,
                 data,
                 protocol_version: Some(self.protocol_version.clone()),
+                packet_json: None,
             };
 
             // Serialize the packet entry using bincode
