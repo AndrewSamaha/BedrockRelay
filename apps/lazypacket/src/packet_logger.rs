@@ -18,6 +18,8 @@ pub struct PacketEntry {
     pub protocol_version: Option<String>,
     #[serde(skip)]
     pub packet_json: Option<Value>,
+    #[serde(skip)]
+    pub packet_number: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -70,6 +72,7 @@ impl PacketLogger {
                 data,
                 protocol_version: Some(self.protocol_version.clone()),
                 packet_json: None,
+                packet_number: None, // Binary logs don't have packet_number
             };
 
             // Serialize the packet entry using bincode

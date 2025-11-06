@@ -28,8 +28,13 @@ struct SessionLog {
 }
 
 impl SessionLog {
-    async fn load(db: &Database, session_id: i32) -> Result<Self> {
-        let db_packets = db.get_packets(session_id).await?;
+    async fn load(db: &Database, session_id: i32, filter: Option<PacketDirectionFilter>) -> Result<Self> {
+        let db_filter = match filter {
+            Some(PacketDirectionFilter::Clientbound) => Some(0u8),
+            Some(PacketDirectionFilter::Serverbound) => Some(1u8),
+            Some(PacketDirectionFilter::All) | None => None,
+        };
+        let db_packets = db.get_packets(session_id, db_filter).await?;
 
         if db_packets.is_empty() {
             return Err(anyhow::anyhow!("No packets found for session {}", session_id));
@@ -73,6 +78,7 @@ impl SessionLog {
                 data,
                 protocol_version: Some(db_packet.server_version),
                 packet_json: Some(db_packet.packet),
+                packet_number: Some(db_packet.packet_number),
             });
         }
 
@@ -100,11 +106,23 @@ struct ViewerApp {
     show_hex: bool, // Toggle between JSON (default) and hex view
     packet_details_scroll: u16, // Scroll offset for packet details panel
     protocol_parser: Option<protocol::ProtocolParser>, // Loaded protocol parser
+    filter_input: String, // Current filter input text
+    current_filter: Option<PacketDirectionFilter>, // Currently applied filter
+    is_loading: bool, // Whether we're currently loading packets
+    loading_frame: u8, // Frame counter for loading animation
 }
 
 enum ViewerMode {
     SessionList,
     PacketView,
+    FilterInput,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PacketDirectionFilter {
+    Clientbound,
+    Serverbound,
+    All,
 }
 
 impl ViewerApp {
@@ -134,23 +152,78 @@ impl ViewerApp {
             show_hex: false, // JSON by default
             packet_details_scroll: 0,
             protocol_parser,
+            filter_input: String::new(),
+            current_filter: None,
+            is_loading: false,
+            loading_frame: 0,
         })
     }
 
     async fn load_session(&mut self) -> Result<()> {
         if let Some((session, _)) = self.sessions.get(self.selected_session) {
-            let log = SessionLog::load(&self.db, session.id).await?;
-            self.current_log = Some(log);
-            self.packet_index = 0;
-            self.mode = ViewerMode::PacketView;
-            Ok(())
+            self.is_loading = true;
+            let filter = self.current_filter;
+            let result = SessionLog::load(&self.db, session.id, filter).await;
+            self.is_loading = false;
+            
+            match result {
+                Ok(log) => {
+                    self.current_log = Some(log);
+                    self.packet_index = 0;
+                    self.packet_details_scroll = 0;
+                    // Initialize filter input to show current filter
+                    self.filter_input = match self.current_filter {
+                        Some(PacketDirectionFilter::Clientbound) => "c".to_string(),
+                        Some(PacketDirectionFilter::Serverbound) => "s".to_string(),
+                        Some(PacketDirectionFilter::All) | None => "a".to_string(),
+                    };
+                    self.mode = ViewerMode::PacketView;
+                    Ok(())
+                }
+                Err(e) => Err(e)
+            }
         } else {
             Err(anyhow::anyhow!("No session selected"))
+        }
+    }
+    
+    fn parse_filter(input: &str) -> Option<PacketDirectionFilter> {
+        match input.trim().to_lowercase().as_str() {
+            "c" => Some(PacketDirectionFilter::Clientbound),
+            "s" => Some(PacketDirectionFilter::Serverbound),
+            "a" => Some(PacketDirectionFilter::All),
+            _ => None,
         }
     }
 
     fn current_packet(&self) -> Option<&PacketEntry> {
         self.current_log.as_ref()?.packets.get(self.packet_index)
+    }
+    
+    fn find_closest_packet_index(&self, target_packet_number: i64) -> usize {
+        if let Some(log) = &self.current_log {
+            if log.packets.is_empty() {
+                return 0;
+            }
+            
+            // Find the packet with the closest packet_number
+            let mut closest_index = 0;
+            let mut min_diff = i64::MAX;
+            
+            for (index, packet) in log.packets.iter().enumerate() {
+                if let Some(packet_num) = packet.packet_number {
+                    let diff = (packet_num - target_packet_number).abs();
+                    if diff < min_diff {
+                        min_diff = diff;
+                        closest_index = index;
+                    }
+                }
+            }
+            
+            closest_index
+        } else {
+            0
+        }
     }
 
     fn prev_packet(&mut self) {
@@ -301,6 +374,83 @@ async fn main() -> Result<()> {
                                     // Reset scroll when toggling view
                                     app.packet_details_scroll = 0;
                                 }
+                                KeyCode::Char('f') | KeyCode::Char('F') => {
+                                    // Enter filter input mode
+                                    // Initialize filter input with current filter if one exists
+                                    app.filter_input = match app.current_filter {
+                                        Some(PacketDirectionFilter::Clientbound) => "c".to_string(),
+                                        Some(PacketDirectionFilter::Serverbound) => "s".to_string(),
+                                        Some(PacketDirectionFilter::All) | None => "a".to_string(),
+                                    };
+                                    app.mode = ViewerMode::FilterInput;
+                                }
+                                _ => {}
+                            }
+                        }
+                        ViewerMode::FilterInput => {
+                            match key.code {
+                                KeyCode::Esc => {
+                                    // Cancel filter - revert filter input to current filter
+                                    app.filter_input = match app.current_filter {
+                                        Some(PacketDirectionFilter::Clientbound) => "c".to_string(),
+                                        Some(PacketDirectionFilter::Serverbound) => "s".to_string(),
+                                        Some(PacketDirectionFilter::All) | None => "a".to_string(),
+                                    };
+                                    app.mode = ViewerMode::PacketView;
+                                }
+                                KeyCode::Enter => {
+                                    // Apply filter
+                                    let filter = ViewerApp::parse_filter(&app.filter_input);
+                                    
+                                    // Save current packet number to preserve position
+                                    let current_packet_number = app.current_packet()
+                                        .and_then(|p| p.packet_number)
+                                        .or_else(|| {
+                                            app.current_log.as_ref()
+                                                .and_then(|log| log.packets.first())
+                                                .and_then(|p| p.packet_number)
+                                        });
+                                    
+                                    app.current_filter = filter;
+                                    // Keep filter_input visible so user can see what filter is applied
+                                    app.mode = ViewerMode::PacketView;
+                                    
+                                    // Reload session with new filter
+                                    if let Some((session, _)) = app.sessions.get(app.selected_session) {
+                                        app.is_loading = true;
+                                        let filter_to_apply = app.current_filter;
+                                        let result = SessionLog::load(&app.db, session.id, filter_to_apply).await;
+                                        app.is_loading = false;
+                                        
+                                        match result {
+                                            Ok(log) => {
+                                                app.current_log = Some(log);
+                                                
+                                                // Try to preserve packet position by finding closest packet_number
+                                                if let Some(target_packet_num) = current_packet_number {
+                                                    app.packet_index = app.find_closest_packet_index(target_packet_num);
+                                                } else {
+                                                    app.packet_index = 0;
+                                                }
+                                                
+                                                app.packet_details_scroll = 0;
+                                                // Keep filter_input showing the applied filter
+                                            }
+                                            Err(e) => {
+                                                app.error_message = Some(format!("Failed to load filtered packets: {}", e));
+                                            }
+                                        }
+                                    }
+                                }
+                                KeyCode::Backspace => {
+                                    app.filter_input.pop();
+                                }
+                                KeyCode::Char(c) => {
+                                    // Only allow single character filter input
+                                    if app.filter_input.is_empty() {
+                                        app.filter_input.push(c);
+                                    }
+                                }
                                 _ => {}
                             }
                         }
@@ -316,9 +466,14 @@ async fn main() -> Result<()> {
 }
 
 fn ui(f: &mut Frame, app: &mut ViewerApp) {
+    // Update loading animation frame
+    if app.is_loading {
+        app.loading_frame = app.loading_frame.wrapping_add(1);
+    }
+    
     match app.mode {
         ViewerMode::SessionList => render_session_list(f, app),
-        ViewerMode::PacketView => render_packet_view(f, app), // app is already &mut ViewerApp here
+        ViewerMode::PacketView | ViewerMode::FilterInput => render_packet_view(f, app),
     }
 }
 
@@ -389,6 +544,7 @@ fn render_packet_view(f: &mut Frame, app: &mut ViewerApp) {
         .direction(ratatui::layout::Direction::Vertical)
         .constraints([
             Constraint::Length(3), // Header
+            Constraint::Length(5), // Filter panel (taller to fit text)
             Constraint::Length(3), // Timeline
             Constraint::Min(0),    // Packet details
         ])
@@ -407,25 +563,34 @@ fn render_packet_view(f: &mut Frame, app: &mut ViewerApp) {
     };
 
     let view_mode = if app.show_hex { "HEX" } else { "JSON" };
+    let filter_str = match app.current_filter {
+        Some(PacketDirectionFilter::Clientbound) => " [Filter: Clientbound]",
+        Some(PacketDirectionFilter::Serverbound) => " [Filter: Serverbound]",
+        Some(PacketDirectionFilter::All) | None => "",
+    };
     let version_str = log.protocol_version.as_ref()
         .map(|v| format!("Protocol: {}", v))
         .unwrap_or_else(|| "Protocol: Unknown".to_string());
     let header_text = format!(
-        "Session: #{} | {} | Packet: {}/{} | Time: {} | View: {} | [?/?/h/l: navigate, ?/?/k/j: scroll details, PgUp/PgDn: jump 10, Home/End: first/last, x: view, q: back]",
+        "Session: #{} | {} | Packet: {}/{} | Time: {} | View: {}{} | [?/?/h/l: navigate, ?/?/k/j: scroll details, PgUp/PgDn: jump 10, Home/End: first/last, x: view, f: filter, q: back]",
         log.session_id,
         version_str,
         packet_num,
         total_packets,
         session_time,
-        view_mode
+        view_mode,
+        filter_str
     );
 
     let header = Paragraph::new(header_text)
         .block(Block::default().borders(Borders::ALL).title("Packet Viewer"));
     f.render_widget(header, chunks[0]);
 
+    // Filter panel
+    render_filter_panel(f, chunks[1], &app);
+
     // Timeline visualization
-    render_timeline(f, chunks[1], app);
+    render_timeline(f, chunks[2], app);
 
     // Packet details
     if let Some(packet) = packet {
@@ -443,12 +608,17 @@ fn render_packet_view(f: &mut Frame, app: &mut ViewerApp) {
             .unwrap_or_default();
         let time_str = timestamp_dt.format("%Y-%m-%d %H:%M:%S%.3f UTC").to_string();
 
+        let packet_number_str = packet.packet_number
+            .map(|n| format!("Packet Number: {}\n", n))
+            .unwrap_or_else(|| String::new());
+        
         let details = if app.show_hex {
             // Hex view
             format!(
-                "Direction: {}\nTimestamp: {}\nSize: {} bytes\n\nHex Dump:\n{}",
+                "Direction: {}\nTimestamp: {}\n{}Size: {} bytes\n\nHex Dump:\n{}",
                 direction_str,
                 time_str,
+                packet_number_str,
                 packet.data.len(),
                 hex_dump(&packet.data, 16)
             )
@@ -461,9 +631,10 @@ fn render_packet_view(f: &mut Frame, app: &mut ViewerApp) {
                     Ok(json_str) => {
                         // Add metadata header
                         format!(
-                            "Direction: {}\nTimestamp: {}\nRelative Time: {:.3}s\n\nPacket JSON:\n{}",
+                            "Direction: {}\nTimestamp: {}\n{}Relative Time: {:.3}s\n\nPacket JSON:\n{}",
                             direction_str,
                             time_str,
+                            packet_number_str,
                             log.relative_time(packet.timestamp) as f64 / 1000.0,
                             json_str
                         )
@@ -479,6 +650,11 @@ fn render_packet_view(f: &mut Frame, app: &mut ViewerApp) {
                     "relative_time_ms": log.relative_time(packet.timestamp),
                     "size_bytes": packet.data.len(),
                 });
+                
+                // Add packet_number if available
+                if let Some(packet_num) = packet.packet_number {
+                    json_value["packet_number"] = serde_json::json!(packet_num);
+                }
                 
                 // Try to decode packet using protocol parser
                 if let Some(ref parser) = app.protocol_parser {
@@ -510,7 +686,7 @@ fn render_packet_view(f: &mut Frame, app: &mut ViewerApp) {
 
         // Split content into lines for scrolling
         let lines: Vec<&str> = details.lines().collect();
-        let max_lines = chunks[2].height.saturating_sub(2) as usize; // Account for border
+        let max_lines = chunks[3].height.saturating_sub(2) as usize; // Account for border
         let total_lines = lines.len();
         
         // Calculate scroll bounds
@@ -556,12 +732,15 @@ fn render_packet_view(f: &mut Frame, app: &mut ViewerApp) {
             )
             .wrap(Wrap { trim: false });
 
-        f.render_widget(details_paragraph, chunks[2]);
+        f.render_widget(details_paragraph, chunks[3]);
     } else {
         let empty = Paragraph::new("No packet selected")
             .block(Block::default().borders(Borders::ALL).title("Packet Details"));
-        f.render_widget(empty, chunks[2]);
+        f.render_widget(empty, chunks[3]);
     }
+    
+    // Show loading indicator overlay if loading
+    render_loading_indicator(f, app);
 }
 
 fn render_timeline(f: &mut Frame, area: Rect, app: &ViewerApp) {
@@ -653,4 +832,83 @@ fn hex_dump(data: &[u8], bytes_per_line: usize) -> String {
         offset += chunk.len();
     }
     output
+}
+
+fn render_filter_panel(f: &mut Frame, area: Rect, app: &ViewerApp) {
+    let filter_text = format!("Filter: {}", app.filter_input);
+    let help_text = "c = clientbound, s = serverbound, a = all | Enter to apply, Esc to cancel";
+    
+    let chunks = Layout::default()
+        .direction(ratatui::layout::Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Input line (with border, needs 3 lines)
+            Constraint::Length(2), // Help text
+        ])
+        .split(area);
+    
+    let input_style = if matches!(app.mode, ViewerMode::FilterInput) {
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::White)
+    };
+    
+    let input_paragraph = Paragraph::new(filter_text.as_str())
+        .block(Block::default().borders(Borders::ALL).title("Filter Packets"))
+        .style(input_style);
+    f.render_widget(input_paragraph, chunks[0]);
+    
+    let help_paragraph = Paragraph::new(help_text)
+        .block(Block::default())
+        .style(Style::default().fg(Color::DarkGray))
+        .wrap(Wrap { trim: false });
+    f.render_widget(help_paragraph, chunks[1]);
+    
+    // Show cursor only when in FilterInput mode
+    if matches!(app.mode, ViewerMode::FilterInput) {
+        f.set_cursor(
+            chunks[0].x + 8 + app.filter_input.len() as u16,
+            chunks[0].y + 1,
+        );
+    }
+}
+
+fn render_loading_indicator(f: &mut Frame, app: &ViewerApp) {
+    if !app.is_loading {
+        return;
+    }
+    
+    // Create centered popup
+    let popup_area = centered_rect(30, 5, f.size());
+    
+    // Animated loading spinner
+    let spinner_chars = ['?', '?', '?', '?', '?', '?', '?', '?', '?', '?'];
+    let spinner = spinner_chars[(app.loading_frame as usize / 3) % spinner_chars.len()];
+    
+    let loading_text = format!("{} Loading packets...", spinner);
+    let loading_paragraph = Paragraph::new(loading_text)
+        .block(Block::default().borders(Borders::ALL).title("Loading"))
+        .style(Style::default().fg(Color::Cyan))
+        .alignment(ratatui::layout::Alignment::Center);
+    
+    f.render_widget(loading_paragraph, popup_area);
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(ratatui::layout::Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(r);
+
+    Layout::default()
+        .direction(ratatui::layout::Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
 }

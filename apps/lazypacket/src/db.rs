@@ -100,18 +100,45 @@ impl Database {
         Ok(row.get::<_, i64>(0) as usize)
     }
 
-    pub async fn get_packets(&self, session_id: i32) -> Result<Vec<DbPacket>> {
-        let rows = self
-            .client
-            .query(
-                "SELECT id, session_id, ts, session_time_ms, packet_number, server_version, direction, packet 
-                 FROM packets 
-                 WHERE session_id = $1 
-                 ORDER BY packet_number ASC",
-                &[&session_id],
-            )
-            .await
-            .context("Failed to query packets")?;
+    pub async fn get_packets(&self, session_id: i32, direction_filter: Option<u8>) -> Result<Vec<DbPacket>> {
+        // direction_filter: 0 = clientbound, 1 = serverbound, None = all
+        let rows = match direction_filter {
+            Some(0) => {
+                self.client
+                    .query(
+                        "SELECT id, session_id, ts, session_time_ms, packet_number, server_version, direction, packet 
+                     FROM packets 
+                     WHERE session_id = $1 AND direction = 'clientbound'
+                     ORDER BY packet_number ASC",
+                        &[&session_id],
+                    )
+                    .await
+            }
+            Some(1) => {
+                self.client
+                    .query(
+                        "SELECT id, session_id, ts, session_time_ms, packet_number, server_version, direction, packet 
+                     FROM packets 
+                     WHERE session_id = $1 AND direction = 'serverbound'
+                     ORDER BY packet_number ASC",
+                        &[&session_id],
+                    )
+                    .await
+            }
+            Some(_) | None => {
+                // Invalid filter value or no filter - show all packets
+                self.client
+                    .query(
+                        "SELECT id, session_id, ts, session_time_ms, packet_number, server_version, direction, packet 
+                     FROM packets 
+                     WHERE session_id = $1 
+                     ORDER BY packet_number ASC",
+                        &[&session_id],
+                    )
+                    .await
+            }
+        }
+        .context("Failed to query packets")?;
 
         let mut packets = Vec::new();
         for row in rows {
