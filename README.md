@@ -1,6 +1,8 @@
 # BedrockRelay Monorepo
 
-A monorepo for Minecraft Bedrock packet relay and inspection tools.
+A monorepo for Minecraft Bedrock packet relay and inspection tools. In operation, the relay sits between a bedrock server and client.
+A client connects to the relay, which forwards packets to the server and logs them to a postgres database (see the included docker-compose.yaml).
+The packets can be viewed and filtered from the database using the included CLI application, lazypacket.
 
 ## Structure
 
@@ -71,7 +73,7 @@ cargo build --release --bin viewer
 
 ### Prerequisites
 
-- Node.js >= 18.0.0
+- Node.js >= 24.10.0
 - pnpm >= 8.0.0
 - Rust (for lazypacket)
 - Docker & Docker Compose (for PostgreSQL)
