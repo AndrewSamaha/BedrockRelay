@@ -328,10 +328,9 @@ impl ProtocolParser {
             // Decode fields from packet definition
             match decoder.decode_fields(&info.fields) {
                 Ok(decoded) => fields = decoded,
-                Err(e) => {
+                Err(_e) => {
                     // On decode error, still return packet ID and name
-                    // but log the error (could be due to missing data, wrong format, etc.)
-                    tracing::debug!("Failed to decode packet fields: {}", e);
+                    // (could be due to missing data, wrong format, etc.)
                 }
             }
         }
@@ -382,8 +381,7 @@ impl<'a> BinaryDecoder<'a> {
                     result.insert(field_name.clone(), value);
                 }
                 Err(e) => {
-                    // Log but continue with other fields
-                    tracing::debug!("Failed to decode field '{}': {}", field_name, e);
+                    // Continue with other fields on decode error
                     // Insert error placeholder
                     result.insert(
                         field_name.clone(),
@@ -779,7 +777,7 @@ impl<'a> BinaryDecoder<'a> {
                 // Verify we read the expected amount
                 let read = self.cursor.position() - start_pos;
                 if read != len as u64 {
-                    tracing::warn!("Encapsulated length mismatch: expected {}, read {}", len, read);
+                    eprintln!("Warning: Encapsulated length mismatch: expected {}, read {}", len, read);
                 }
                 Ok(value)
             }

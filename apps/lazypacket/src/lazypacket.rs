@@ -583,7 +583,7 @@ fn render_packet_view(f: &mut Frame, app: &mut ViewerApp) {
     );
 
     let header = Paragraph::new(header_text)
-        .block(Block::default().borders(Borders::ALL).title("Packet Viewer"));
+        .block(Block::default().borders(Borders::ALL).title("lazypacket"));
     f.render_widget(header, chunks[0]);
 
     // Filter panel

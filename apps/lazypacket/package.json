@@ -5,8 +5,8 @@
   "private": true,
   "scripts": {
     "install": "echo 'Rust package - no npm dependencies to install'",
-    "build": "cargo build --release --bin viewer",
-    "start": "cargo run --release --bin viewer",
-    "dev": "cargo run --bin viewer"
+    "build": "cargo build --release --bin lazypacket",
+    "start": "cargo run --release --bin lazypacket",
+    "dev": "cargo run --bin lazypacket"
   }
 }

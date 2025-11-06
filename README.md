@@ -36,18 +36,18 @@ pnpm --filter @bedrockrelay/relay start
 
 Rust-based CLI tool for browsing and introspecting packets stored in PostgreSQL.
 
-**Start the viewer:**
+**Start lazypacket:**
 ```bash
-pnpm start:viewer
+pnpm start:lazypacket
 # or
-pnpm viewer
+pnpm lazypacket
 # or
 pnpm --filter @bedrockrelay/lazypacket start
 ```
 
 **Environment Variables:**
 
-The viewer loads environment variables from the `.env` file in the project root. The Rust binary uses the `dotenv` crate to automatically search for `.env` files in multiple locations:
+lazypacket loads environment variables from the `.env` file in the project root. The Rust binary uses the `dotenv` crate to automatically search for `.env` files in multiple locations:
 1. Current working directory (`.env`)
 2. Two levels up (`../../.env`) - project root when running from `apps/lazypacket/`
 3. One level up (`../.env`) - project root when running from project root
@@ -59,14 +59,14 @@ Make sure your `.env` file contains the database connection settings:
 - `DB_PASSWORD` (default: postgres)
 - `DB_NAME` (default: postgres)
 
-The viewer will show helpful error messages if the database connection fails, including which connection parameters were used.
+lazypacket will show helpful error messages if the database connection fails, including which connection parameters were used.
 
 **Build:**
 ```bash
 pnpm --filter @bedrockrelay/lazypacket build
 # or
 cd apps/lazypacket
-cargo build --release --bin viewer
+cargo build --release --bin lazypacket
 ```
 
 ## Development
@@ -92,7 +92,7 @@ docker compose up -d
 
 3. Configure environment variables (create `.env` file at project root):
 ```bash
-# Database (used by both relay and viewer)
+# Database (used by both relay and lazypacket)
 DB_HOST=localhost
 DB_PORT=5432
 DB_USER=postgres
@@ -107,9 +107,9 @@ PROXY_DESTINATION_ADDRESS=192.168.1.100
 PROXY_DESTINATION_PORT=19132
 ```
 
-**Note:** Both the relay and viewer load the `.env` file from the project root:
+**Note:** Both the relay and lazypacket load the `.env` file from the project root:
 - **Relay**: Explicitly loads `../../.env` relative to `apps/relay/relay.js`
-- **Viewer**: Uses `dotenv` crate to search multiple locations (current dir, `../../.env`, `../.env`)
+- **lazypacket**: Uses `dotenv` crate to search multiple locations (current dir, `../../.env`, `../.env`)
 
 ### Available Scripts
 
@@ -117,8 +117,8 @@ PROXY_DESTINATION_PORT=19132
 - `pnpm test` - Run tests for all apps
 - `pnpm start` - Start all apps
 - `pnpm start:relay` - Start only the relay server
-- `pnpm start:viewer` or `pnpm viewer` - Start the packet viewer
-- `pnpm viewer:dev` - Start the viewer in dev mode (debug build)
+- `pnpm start:lazypacket` or `pnpm lazypacket` - Start lazypacket
+- `pnpm lazypacket:dev` - Start lazypacket in dev mode (debug build)
 - `pnpm db:wipe` - Wipe database volumes
 
 ### Turborepo
