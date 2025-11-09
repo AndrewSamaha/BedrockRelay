@@ -871,6 +871,16 @@ fn render_packet_view(f: &mut Frame, app: &mut ViewerApp) {
     let is_baseline_for_diff = app.baseline_packet_index == Some(app.packet_index);
     let baseline_json_for_diff = app.baseline_packet_json.clone();
     let diff_panel_scroll_value = app.diff_panel_scroll;
+    
+    // Extract metadata for delta calculation
+    let current_packet_timestamp = packet.map(|p| p.timestamp);
+    let current_packet_number = packet.and_then(|p| p.packet_number);
+    let baseline_packet_timestamp = app.baseline_packet_index
+        .and_then(|idx| log.packets.get(idx))
+        .map(|p| p.timestamp);
+    let baseline_packet_number = app.baseline_packet_index
+        .and_then(|idx| log.packets.get(idx))
+        .and_then(|p| p.packet_number);
 
     // Packet details (left panel, or full width if not in compare mode)
     if let Some(packet) = packet {
@@ -1016,7 +1026,19 @@ fn render_packet_view(f: &mut Frame, app: &mut ViewerApp) {
 
         // Render differences panel if in compare mode
         if app.compare_mode && !app.show_hex && detail_chunks.len() > 1 {
-            render_diff_panel(f, detail_chunks[1], &packet_json_for_diff, &baseline_json_for_diff, is_baseline_for_diff, diff_panel_scroll_value, &mut app.diff_panel_scroll);
+            render_diff_panel(
+                f, 
+                detail_chunks[1], 
+                &packet_json_for_diff, 
+                &baseline_json_for_diff, 
+                is_baseline_for_diff,
+                current_packet_timestamp,
+                current_packet_number,
+                baseline_packet_timestamp,
+                baseline_packet_number,
+                diff_panel_scroll_value, 
+                &mut app.diff_panel_scroll
+            );
         }
     } else {
         let empty = Paragraph::new("No packet selected")
@@ -1035,11 +1057,60 @@ fn render_packet_view(f: &mut Frame, app: &mut ViewerApp) {
     render_loading_indicator(f, app);
 }
 
-fn render_diff_panel(f: &mut Frame, area: Rect, packet_json: &Option<serde_json::Value>, baseline_json: &Option<serde_json::Value>, is_baseline: bool, scroll: u16, scroll_ref: &mut u16) {
+fn render_diff_panel(
+    f: &mut Frame, 
+    area: Rect, 
+    packet_json: &Option<serde_json::Value>, 
+    baseline_json: &Option<serde_json::Value>, 
+    is_baseline: bool,
+    current_timestamp: Option<i64>,
+    current_packet_number: Option<i64>,
+    baseline_timestamp: Option<i64>,
+    baseline_packet_number: Option<i64>,
+    scroll: u16, 
+    scroll_ref: &mut u16
+) {
     // Build colored lines for differences
     let (diff_lines_vec, total_diff_lines) = if let Some(ref packet_json) = packet_json {
         if let Some(ref baseline_json) = baseline_json {
             let mut all_lines = Vec::new();
+            
+            // Add metadata deltas at the top
+            if !is_baseline {
+                // Time delta
+                if let (Some(current_ts), Some(baseline_ts)) = (current_timestamp, baseline_timestamp) {
+                    let time_delta_ms = current_ts - baseline_ts;
+                    let time_delta_sec = time_delta_ms as f64 / 1000.0;
+                    let time_delta_str = if time_delta_ms >= 0 {
+                        format!("Time delta: +{:.3}s", time_delta_sec)
+                    } else {
+                        format!("Time delta: {:.3}s", time_delta_sec)
+                    };
+                    all_lines.push(Line::from(Span::styled(
+                        time_delta_str,
+                        Style::default().fg(Color::Cyan)
+                    )));
+                }
+                
+                // Packet number delta
+                if let (Some(current_num), Some(baseline_num)) = (current_packet_number, baseline_packet_number) {
+                    let packet_delta = current_num - baseline_num;
+                    let packet_delta_str = if packet_delta >= 0 {
+                        format!("Packet number delta: +{}", packet_delta)
+                    } else {
+                        format!("Packet number delta: {}", packet_delta)
+                    };
+                    all_lines.push(Line::from(Span::styled(
+                        packet_delta_str,
+                        Style::default().fg(Color::Cyan)
+                    )));
+                }
+                
+                if (current_timestamp.is_some() && baseline_timestamp.is_some()) || 
+                   (current_packet_number.is_some() && baseline_packet_number.is_some()) {
+                    all_lines.push(Line::from(""));
+                }
+            }
             
             if is_baseline {
                 all_lines.push(Line::from(Span::styled(
