@@ -833,7 +833,7 @@ fn render_packet_view(f: &mut Frame, app: &mut ViewerApp) {
         .map(|v| format!("Protocol: {}", v))
         .unwrap_or_else(|| "Protocol: Unknown".to_string());
     let header_text = format!(
-        "Session: #{} | {} | Packet: {}/{} | Time: {} | View: {}{}{} | [?/?/h/l: navigate, ?/?/k/j: scroll details, PgUp/PgDn: jump 10, Home/End: first/last, x: view, f: filter, c: compare, Esc: exit compare, q: back]",
+        "Session: #{} | {} | Packet: {}/{} | Time: {} | View: {}{}{} | [Left/Right/h/l: navigate, Up/Down/k/j: scroll details, PgUp/PgDn: jump 10, Home/End: first/last, x: view, f: filter, c: compare, Esc: exit compare, q: back]",
         log.session_id,
         version_str,
         packet_num,
