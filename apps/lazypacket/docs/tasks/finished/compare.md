@@ -162,12 +162,11 @@ When in compare mode:
 ✅ Handle edge cases (empty packets, different structures, nested objects, arrays)  
 ✅ Baseline packet viewing message  
 ✅ No differences message  
-
+✅ Scroll support for differences panel  
 ## Future Enhancements (Not Implemented)
 
 - Toggle to show/hide unchanged fields
 - Ability to change baseline packet without exiting compare mode
-- Scroll support for differences panel (currently auto-updates on navigation)
 - Export comparison results
 - Compare multiple packets at once
 - Highlight specific field paths of interest
