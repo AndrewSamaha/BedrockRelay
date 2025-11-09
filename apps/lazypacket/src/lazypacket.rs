@@ -106,6 +106,7 @@ struct ViewerApp {
     error_message: Option<String>,
     show_hex: bool, // Toggle between JSON (default) and hex view
     packet_details_scroll: u16, // Scroll offset for packet details panel
+    diff_panel_scroll: u16, // Scroll offset for differences panel (compare mode)
     protocol_parser: Option<protocol::ProtocolParser>, // Loaded protocol parser
     filter_input: String, // Current filter input text
     current_filter: Option<PacketDirectionFilter>, // Currently applied filter
@@ -155,6 +156,7 @@ impl ViewerApp {
             error_message: None,
             show_hex: false, // JSON by default
             packet_details_scroll: 0,
+            diff_panel_scroll: 0,
             protocol_parser,
             filter_input: String::new(),
             current_filter: None,
@@ -178,6 +180,7 @@ impl ViewerApp {
                     self.current_log = Some(log);
                     self.packet_index = 0;
                     self.packet_details_scroll = 0;
+                    self.diff_panel_scroll = 0;
                     // Reset compare mode when loading new session
                     self.compare_mode = false;
                     self.baseline_packet_index = None;
@@ -242,6 +245,7 @@ impl ViewerApp {
             self.packet_index -= 1;
             // Reset scroll when packet changes
             self.packet_details_scroll = 0;
+            self.diff_panel_scroll = 0;
         }
     }
 
@@ -251,6 +255,7 @@ impl ViewerApp {
                 self.packet_index += 1;
                 // Reset scroll when packet changes
                 self.packet_details_scroll = 0;
+                self.diff_panel_scroll = 0;
             }
         }
     }
@@ -538,6 +543,7 @@ async fn main() -> Result<()> {
                                         app.baseline_packet_index = None;
                                         app.baseline_packet_json = None;
                                         app.packet_details_scroll = 0;
+                                        app.diff_panel_scroll = 0;
                                     } else {
                                         app.mode = ViewerMode::SessionList;
                                         app.current_log = None;
@@ -553,6 +559,7 @@ async fn main() -> Result<()> {
                                         app.baseline_packet_index = Some(app.packet_index);
                                         app.baseline_packet_json = Some(packet_json);
                                         app.packet_details_scroll = 0;
+                                        app.diff_panel_scroll = 0;
                                     }
                                 }
                                 KeyCode::Left | KeyCode::Char('h') => {
@@ -582,6 +589,7 @@ async fn main() -> Result<()> {
                                     // Reset scroll if packet actually changed
                                     if app.packet_index != old_index {
                                         app.packet_details_scroll = 0;
+                                        app.diff_panel_scroll = 0;
                                     }
                                 }
                                 KeyCode::PageDown => {
@@ -593,16 +601,19 @@ async fn main() -> Result<()> {
                                     // Reset scroll if packet actually changed
                                     if app.packet_index != old_index {
                                         app.packet_details_scroll = 0;
+                                        app.diff_panel_scroll = 0;
                                     }
                                 }
                                 KeyCode::Home => {
                                     app.packet_index = 0;
                                     app.packet_details_scroll = 0;
+                                    app.diff_panel_scroll = 0;
                                 }
                                 KeyCode::End => {
                                     if let Some(log) = &app.current_log {
                                         app.packet_index = log.packets.len().saturating_sub(1);
                                         app.packet_details_scroll = 0;
+                                        app.diff_panel_scroll = 0;
                                     }
                                 }
                                 KeyCode::Char('x') | KeyCode::Char('X') => {
@@ -610,6 +621,7 @@ async fn main() -> Result<()> {
                                     app.show_hex = !app.show_hex;
                                     // Reset scroll when toggling view
                                     app.packet_details_scroll = 0;
+                                    app.diff_panel_scroll = 0;
                                 }
                                 KeyCode::Char('f') | KeyCode::Char('F') => {
                                     // Enter filter input mode
@@ -675,8 +687,9 @@ async fn main() -> Result<()> {
                                                     app.packet_index = 0;
                                                 }
                                                 
-                                                app.packet_details_scroll = 0;
-                                                // Keep filter_input showing the applied filter
+                                app.packet_details_scroll = 0;
+                                app.diff_panel_scroll = 0;
+                                // Keep filter_input showing the applied filter
                                             }
                                             Err(e) => {
                                                 app.error_message = Some(format!("Failed to load filtered packets: {}", e));
@@ -841,7 +854,25 @@ fn render_packet_view(f: &mut Frame, app: &mut ViewerApp) {
     // Timeline visualization
     render_timeline(f, chunks[2], app);
 
-    // Packet details
+    // Split packet details area horizontally if in compare mode
+    let detail_chunks: Vec<Rect> = if app.compare_mode && !app.show_hex {
+        Layout::default()
+            .direction(ratatui::layout::Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(chunks[3])
+            .to_vec()
+    } else {
+        // Single panel - use full width
+        vec![chunks[3]]
+    };
+
+    // Extract packet data and scroll values before modifying app
+    let packet_json_for_diff = packet.and_then(|p| p.packet_json.clone());
+    let is_baseline_for_diff = app.baseline_packet_index == Some(app.packet_index);
+    let baseline_json_for_diff = app.baseline_packet_json.clone();
+    let diff_panel_scroll_value = app.diff_panel_scroll;
+
+    // Packet details (left panel, or full width if not in compare mode)
     if let Some(packet) = packet {
         let direction_str = match packet.direction {
             PacketDirection::Clientbound => "? Clientbound",
@@ -862,7 +893,7 @@ fn render_packet_view(f: &mut Frame, app: &mut ViewerApp) {
             .unwrap_or_else(|| String::new());
         
         let details = if app.show_hex {
-            // Hex view - compare mode not supported in hex view
+            // Hex view
             format!(
                 "Direction: {}\nTimestamp: {}\n{}Size: {} bytes\n\nHex Dump:\n{}",
                 direction_str,
@@ -871,43 +902,6 @@ fn render_packet_view(f: &mut Frame, app: &mut ViewerApp) {
                 packet.data.len(),
                 hex_dump(&packet.data, 16)
             )
-        } else if app.compare_mode && app.baseline_packet_json.is_some() {
-            // Compare mode - show differences
-            if let Some(ref packet_json) = packet.packet_json {
-                if let Some(ref baseline_json) = app.baseline_packet_json {
-                    let diff = compare_json(baseline_json, packet_json);
-                    let diff_lines = format_json_diff(&diff, "", 0);
-                    
-                    if diff_lines.is_empty() {
-                        // No differences found
-                        format!(
-                            "Direction: {}\nTimestamp: {}\n{}Relative Time: {:.3}s\n\nNo differences from baseline packet.\n",
-                            direction_str,
-                            time_str,
-                            packet_number_str,
-                            log.relative_time(packet.timestamp) as f64 / 1000.0
-                        )
-                    } else {
-                        // Build formatted diff text with metadata
-                        let mut diff_text = format!(
-                            "Direction: {}\nTimestamp: {}\n{}Relative Time: {:.3}s\n\nDifferences from baseline:\n",
-                            direction_str,
-                            time_str,
-                            packet_number_str,
-                            log.relative_time(packet.timestamp) as f64 / 1000.0
-                        );
-                        for (line, _) in &diff_lines {
-                            diff_text.push_str(line);
-                            diff_text.push('\n');
-                        }
-                        diff_text
-                    }
-                } else {
-                    format!("Error: Baseline packet JSON not available")
-                }
-            } else {
-                format!("Error: Current packet JSON not available for comparison")
-            }
         } else {
             // JSON view (default) - display packet JSON from database
             if let Some(ref packet_json) = packet.packet_json {
@@ -970,71 +964,12 @@ fn render_packet_view(f: &mut Frame, app: &mut ViewerApp) {
             }
         };
 
-        // Handle compare mode with colored output
-        let (lines_vec, total_lines) = if app.compare_mode && !app.show_hex && app.baseline_packet_json.is_some() {
-            // Check if current packet is the baseline
-            let is_baseline = app.baseline_packet_index == Some(app.packet_index);
-            
-            // Build colored lines for compare mode
-            if let Some(ref packet_json) = packet.packet_json {
-                if let Some(ref baseline_json) = app.baseline_packet_json {
-                    let mut all_lines = Vec::new();
-                    
-                    // Add metadata header (plain text)
-                    let metadata = format!(
-                        "Direction: {}\nTimestamp: {}\n{}Relative Time: {:.3}s\n",
-                        direction_str,
-                        time_str,
-                        packet_number_str,
-                        log.relative_time(packet.timestamp) as f64 / 1000.0
-                    );
-                    let metadata_lines: Vec<&str> = metadata.lines().collect();
-                    for line in metadata_lines {
-                        all_lines.push(Line::from(line.to_string()));
-                    }
-                    
-                    if is_baseline {
-                        all_lines.push(Line::from(""));
-                        all_lines.push(Line::from(Span::styled(
-                            "This is the baseline packet for comparison.",
-                            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
-                        )));
-                        all_lines.push(Line::from("Navigate to other packets to see differences."));
-                    } else {
-                        let diff = compare_json(baseline_json, packet_json);
-                        let diff_lines = format_json_diff(&diff, "", 0);
-                        
-                        if diff_lines.is_empty() {
-                            all_lines.push(Line::from(""));
-                            all_lines.push(Line::from("No differences from baseline packet."));
-                        } else {
-                            all_lines.push(Line::from(""));
-                            all_lines.push(Line::from("Differences from baseline:"));
-                            all_lines.push(Line::from(""));
-                            
-                            // Add colored diff lines
-                            for (line, color) in diff_lines {
-                                all_lines.push(Line::from(Span::styled(line, Style::default().fg(color))));
-                            }
-                        }
-                    }
-                    
-                    let total_lines = all_lines.len();
-                    (all_lines, total_lines)
-                } else {
-                    (vec![Line::from("Error: Baseline packet JSON not available")], 1)
-                }
-            } else {
-                (vec![Line::from("Error: Current packet JSON not available for comparison")], 1)
-            }
-        } else {
-            // Regular mode - plain text lines
-            let lines: Vec<&str> = details.lines().collect();
-            let lines_vec: Vec<Line> = lines.iter().map(|l| Line::from(*l)).collect();
-            (lines_vec, lines.len())
-        };
+        // Regular mode - plain text lines for packet details
+        let lines: Vec<&str> = details.lines().collect();
+        let lines_vec: Vec<Line> = lines.iter().map(|l| Line::from(*l)).collect();
+        let total_lines = lines_vec.len();
         
-        let max_lines = chunks[3].height.saturating_sub(2) as usize; // Account for border
+        let max_lines = detail_chunks[0].height.saturating_sub(2) as usize; // Account for border
         
         // Calculate scroll bounds
         let max_scroll = if total_lines > max_lines {
@@ -1077,15 +1012,112 @@ fn render_packet_view(f: &mut Frame, app: &mut ViewerApp) {
             )
             .wrap(Wrap { trim: false });
 
-        f.render_widget(details_paragraph, chunks[3]);
+        f.render_widget(details_paragraph, detail_chunks[0]);
+
+        // Render differences panel if in compare mode
+        if app.compare_mode && !app.show_hex && detail_chunks.len() > 1 {
+            render_diff_panel(f, detail_chunks[1], &packet_json_for_diff, &baseline_json_for_diff, is_baseline_for_diff, diff_panel_scroll_value, &mut app.diff_panel_scroll);
+        }
     } else {
         let empty = Paragraph::new("No packet selected")
             .block(Block::default().borders(Borders::ALL).title("Packet Details"));
-        f.render_widget(empty, chunks[3]);
+        f.render_widget(empty, detail_chunks[0]);
+        
+        // Render empty diff panel if in compare mode
+        if app.compare_mode && !app.show_hex && detail_chunks.len() > 1 {
+            let empty_diff = Paragraph::new("No packet selected")
+                .block(Block::default().borders(Borders::ALL).title("Differences"));
+            f.render_widget(empty_diff, detail_chunks[1]);
+        }
     }
     
     // Show loading indicator overlay if loading
     render_loading_indicator(f, app);
+}
+
+fn render_diff_panel(f: &mut Frame, area: Rect, packet_json: &Option<serde_json::Value>, baseline_json: &Option<serde_json::Value>, is_baseline: bool, scroll: u16, scroll_ref: &mut u16) {
+    // Build colored lines for differences
+    let (diff_lines_vec, total_diff_lines) = if let Some(ref packet_json) = packet_json {
+        if let Some(ref baseline_json) = baseline_json {
+            let mut all_lines = Vec::new();
+            
+            if is_baseline {
+                all_lines.push(Line::from(Span::styled(
+                    "This is the baseline packet for comparison.",
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                )));
+                all_lines.push(Line::from(""));
+                all_lines.push(Line::from("Navigate to other packets to see differences."));
+            } else {
+                let diff = compare_json(baseline_json, packet_json);
+                let diff_lines = format_json_diff(&diff, "", 0);
+                
+                if diff_lines.is_empty() {
+                    all_lines.push(Line::from("No differences from baseline packet."));
+                } else {
+                    all_lines.push(Line::from("Differences from baseline:"));
+                    all_lines.push(Line::from(""));
+                    
+                    // Add colored diff lines
+                    for (line, color) in diff_lines {
+                        all_lines.push(Line::from(Span::styled(line, Style::default().fg(color))));
+                    }
+                }
+            }
+            
+            let total_lines = all_lines.len();
+            (all_lines, total_lines)
+        } else {
+            (vec![Line::from("Error: Baseline packet JSON not available")], 1)
+        }
+    } else {
+        (vec![Line::from("Error: Current packet JSON not available for comparison")], 1)
+    };
+    
+    let max_lines = area.height.saturating_sub(2) as usize; // Account for border
+    
+    // Calculate scroll bounds for diff panel
+    let max_scroll = if total_diff_lines > max_lines {
+        (total_diff_lines - max_lines) as u16
+    } else {
+        0
+    };
+    
+    // Clamp scroll to valid range and update the reference
+    let mut clamped_scroll = scroll;
+    if clamped_scroll > max_scroll {
+        clamped_scroll = max_scroll;
+    }
+    *scroll_ref = clamped_scroll;
+    
+    // Extract visible lines using clamped scroll
+    let start_line = clamped_scroll as usize;
+    let end_line = (start_line + max_lines).min(total_diff_lines);
+    let visible_lines: Vec<Line> = if start_line < total_diff_lines {
+        diff_lines_vec[start_line..end_line].to_vec()
+    } else {
+        Vec::new()
+    };
+    
+    let diff_paragraph = Paragraph::new(visible_lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(Span::styled(
+                    format!(
+                        "Differences {}",
+                        if max_scroll > 0 {
+                            format!("[{}/{} lines]", clamped_scroll + 1, total_diff_lines)
+                        } else {
+                            String::new()
+                        }
+                    ),
+                    Style::default().fg(Color::Cyan),
+                )),
+        )
+        .wrap(Wrap { trim: false });
+    
+    f.render_widget(diff_paragraph, area);
 }
 
 fn render_timeline(f: &mut Frame, area: Rect, app: &ViewerApp) {
