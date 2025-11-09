@@ -29,8 +29,10 @@ const relay = new Relay({
   port: Number(process.env.PROXY_LISTENING_PORT),
   destination: {
     host: process.env.PROXY_DESTINATION_ADDRESS,
-    port: Number(process.env.PROXY_DESTINATION_PORT)
-  }
+    port: Number(process.env.PROXY_DESTINATION_PORT),
+    offline: String(process.env.OFFLINE_MODE).toLowerCase() === 'true',
+  },
+  offline: String(process.env.OFFLINE_MODE).toLowerCase() === 'true'
 })
 relay.conLog = console.debug
 relay.listen() // Tell the server to start listening.
