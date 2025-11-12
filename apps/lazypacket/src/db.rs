@@ -26,6 +26,18 @@ pub struct DbPacket {
     pub packet: Value,
 }
 
+#[derive(Debug, Clone)]
+pub struct DbPacketFilter {
+    pub direction: Option<String>, // "clientbound", "serverbound", or None for all
+    pub packet_name: Option<String>, // Packet name to filter by, or None for all
+    pub packet_name_is_wildcard: bool, // If true, use ILIKE with wildcards; if false, use exact match
+}
+
+#[derive(Debug, Clone)]
+pub struct DbPacketFilterSet {
+    pub filters: Vec<DbPacketFilter>, // OR logic: packet matches if it matches any filter
+}
+
 impl Database {
     pub async fn connect() -> Result<Self> {
         // Get connection string from environment variables
@@ -100,33 +112,10 @@ impl Database {
         Ok(row.get::<_, i64>(0) as usize)
     }
 
-    pub async fn get_packets(&self, session_id: i32, direction_filter: Option<u8>) -> Result<Vec<DbPacket>> {
-        // direction_filter: 0 = clientbound, 1 = serverbound, None = all
-        let rows = match direction_filter {
-            Some(0) => {
-                self.client
-                    .query(
-                        "SELECT id, session_id, ts, session_time_ms, packet_number, server_version, direction, packet 
-                     FROM packets 
-                     WHERE session_id = $1 AND direction = 'clientbound'
-                     ORDER BY packet_number ASC",
-                        &[&session_id],
-                    )
-                    .await
-            }
-            Some(1) => {
-                self.client
-                    .query(
-                        "SELECT id, session_id, ts, session_time_ms, packet_number, server_version, direction, packet 
-                     FROM packets 
-                     WHERE session_id = $1 AND direction = 'serverbound'
-                     ORDER BY packet_number ASC",
-                        &[&session_id],
-                    )
-                    .await
-            }
-            Some(_) | None => {
-                // Invalid filter value or no filter - show all packets
+    pub async fn get_packets(&self, session_id: i32, filter_set: Option<&DbPacketFilterSet>) -> Result<Vec<DbPacket>> {
+        let rows = if let Some(filter_set) = filter_set {
+            if filter_set.filters.is_empty() {
+                // No filters - show all packets
                 self.client
                     .query(
                         "SELECT id, session_id, ts, session_time_ms, packet_number, server_version, direction, packet 
@@ -136,7 +125,77 @@ impl Database {
                         &[&session_id],
                     )
                     .await
+            } else {
+                // Build WHERE clause with OR conditions for each filter
+                let mut conditions = Vec::new();
+                let mut param_index = 1;
+                let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Sync>> = vec![Box::new(session_id)];
+                
+                for filter in &filter_set.filters {
+                    let mut filter_conditions = Vec::new();
+                    
+                    // Direction filter
+                    if let Some(ref direction) = filter.direction {
+                        filter_conditions.push(format!("direction = '{}'", direction));
+                    }
+                    
+                    // Packet name filter
+                    if let Some(ref packet_name) = filter.packet_name {
+                        param_index += 1;
+                        if filter.packet_name_is_wildcard {
+                            // Convert * to % for SQL ILIKE pattern matching
+                            // Note: Users can include literal % or _ in their pattern if needed by escaping
+                            let sql_pattern = packet_name.replace('*', "%");
+                            
+                            filter_conditions.push(format!("packet->>'name' ILIKE ${}", param_index));
+                            params.push(Box::new(sql_pattern));
+                        } else {
+                            // Exact match
+                            filter_conditions.push(format!("packet->>'name' = ${}", param_index));
+                            params.push(Box::new(packet_name.clone()));
+                        }
+                    }
+                    
+                    // Combine conditions for this filter with AND
+                    if !filter_conditions.is_empty() {
+                        conditions.push(format!("({})", filter_conditions.join(" AND ")));
+                    } else {
+                        // No conditions means match all - but we still need a condition
+                        // This shouldn't happen in practice, but handle it
+                        conditions.push("1=1".to_string());
+                    }
+                }
+                
+                // Combine all filters with OR
+                let where_clause = if conditions.is_empty() {
+                    "session_id = $1".to_string()
+                } else {
+                    format!("session_id = $1 AND ({})", conditions.join(" OR "))
+                };
+                
+                let query = format!(
+                    "SELECT id, session_id, ts, session_time_ms, packet_number, server_version, direction, packet 
+                     FROM packets 
+                     WHERE {}
+                     ORDER BY packet_number ASC",
+                    where_clause
+                );
+                
+                // Convert Vec<Box<dyn ToSql + Sync>> to &[&dyn ToSql + Sync]
+                let param_refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = params.iter().map(|p| p.as_ref()).collect();
+                self.client.query(&query, &param_refs[..]).await
             }
+        } else {
+            // No filter set - show all packets
+            self.client
+                .query(
+                    "SELECT id, session_id, ts, session_time_ms, packet_number, server_version, direction, packet 
+                 FROM packets 
+                 WHERE session_id = $1 
+                 ORDER BY packet_number ASC",
+                    &[&session_id],
+                )
+                .await
         }
         .context("Failed to query packets")?;
 
