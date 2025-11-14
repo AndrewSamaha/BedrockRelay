@@ -19,7 +19,7 @@ use ratatui::{
 use serde_json;
 use std::io;
 use std::collections::{BTreeMap, BTreeSet};
-use db::{Database, Session as DbSession};
+use db::{Database, Session as DbSession, DbPacketFilterSet, DbPacketFilter};
 
 struct SessionLog {
     session_id: i32,
@@ -28,14 +28,42 @@ struct SessionLog {
     protocol_version: Option<String>,
 }
 
+impl PacketFilterSet {
+    fn to_db_filter_set(&self) -> DbPacketFilterSet {
+        DbPacketFilterSet {
+            filters: self.filters.iter().map(|f| {
+                DbPacketFilter {
+                    direction: f.direction.map(|d| match d {
+                        FilterPacketDirection::Clientbound => "clientbound".to_string(),
+                        FilterPacketDirection::Serverbound => "serverbound".to_string(),
+                    }),
+                    packet_name: f.packet_name.clone(),
+                    packet_name_is_wildcard: f.packet_name_is_wildcard,
+                }
+            }).collect(),
+        }
+    }
+    
+    fn to_string(&self) -> String {
+        self.filters.iter().map(|f| {
+            let dir_str = match f.direction {
+                Some(FilterPacketDirection::Clientbound) => "c",
+                Some(FilterPacketDirection::Serverbound) => "s",
+                None => "a",
+            };
+            if let Some(ref name) = f.packet_name {
+                format!("{}.{}", dir_str, name)
+            } else {
+                dir_str.to_string()
+            }
+        }).collect::<Vec<_>>().join(",")
+    }
+}
+
 impl SessionLog {
-    async fn load(db: &Database, session_id: i32, filter: Option<PacketDirectionFilter>) -> Result<Self> {
-        let db_filter = match filter {
-            Some(PacketDirectionFilter::Clientbound) => Some(0u8),
-            Some(PacketDirectionFilter::Serverbound) => Some(1u8),
-            Some(PacketDirectionFilter::All) | None => None,
-        };
-        let db_packets = db.get_packets(session_id, db_filter).await?;
+    async fn load(db: &Database, session_id: i32, filter: Option<PacketFilterSet>) -> Result<Self> {
+        let db_filter_set = filter.as_ref().map(|f| f.to_db_filter_set());
+        let db_packets = db.get_packets(session_id, db_filter_set.as_ref()).await?;
 
         if db_packets.is_empty() {
             return Err(anyhow::anyhow!("No packets found for session {}", session_id));
@@ -109,7 +137,7 @@ struct ViewerApp {
     diff_panel_scroll: u16, // Scroll offset for differences panel (compare mode)
     protocol_parser: Option<protocol::ProtocolParser>, // Loaded protocol parser
     filter_input: String, // Current filter input text
-    current_filter: Option<PacketDirectionFilter>, // Currently applied filter
+    current_filter: Option<PacketFilterSet>, // Currently applied filter
     is_loading: bool, // Whether we're currently loading packets
     loading_frame: u8, // Frame counter for loading animation
     compare_mode: bool, // Whether compare mode is active
@@ -123,11 +151,22 @@ enum ViewerMode {
     FilterInput,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PacketFilter {
+    direction: Option<FilterPacketDirection>, // None means "all directions"
+    packet_name: Option<String>, // None means "all packet types"
+    packet_name_is_wildcard: bool, // If true, packet_name contains wildcards (*)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PacketDirectionFilter {
+enum FilterPacketDirection {
     Clientbound,
     Serverbound,
-    All,
+}
+
+#[derive(Debug, Clone)]
+struct PacketFilterSet {
+    filters: Vec<PacketFilter>, // OR logic: packet matches if it matches any filter
 }
 
 impl ViewerApp {
@@ -171,7 +210,7 @@ impl ViewerApp {
     async fn load_session(&mut self) -> Result<()> {
         if let Some((session, _)) = self.sessions.get(self.selected_session) {
             self.is_loading = true;
-            let filter = self.current_filter;
+            let filter = self.current_filter.clone();
             let result = SessionLog::load(&self.db, session.id, filter).await;
             self.is_loading = false;
             
@@ -186,11 +225,9 @@ impl ViewerApp {
                     self.baseline_packet_index = None;
                     self.baseline_packet_json = None;
                     // Initialize filter input to show current filter
-                    self.filter_input = match self.current_filter {
-                        Some(PacketDirectionFilter::Clientbound) => "c".to_string(),
-                        Some(PacketDirectionFilter::Serverbound) => "s".to_string(),
-                        Some(PacketDirectionFilter::All) | None => "a".to_string(),
-                    };
+                    self.filter_input = self.current_filter.as_ref()
+                        .map(|f| f.to_string())
+                        .unwrap_or_else(|| "a".to_string());
                     self.mode = ViewerMode::PacketView;
                     Ok(())
                 }
@@ -201,12 +238,66 @@ impl ViewerApp {
         }
     }
     
-    fn parse_filter(input: &str) -> Option<PacketDirectionFilter> {
-        match input.trim().to_lowercase().as_str() {
-            "c" => Some(PacketDirectionFilter::Clientbound),
-            "s" => Some(PacketDirectionFilter::Serverbound),
-            "a" => Some(PacketDirectionFilter::All),
-            _ => None,
+    fn parse_filter(input: &str) -> Option<PacketFilterSet> {
+        let input = input.trim();
+        if input.is_empty() {
+            return None;
+        }
+        
+        // Split by comma to handle multiple filters
+        let filter_strings: Vec<&str> = input.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        
+        if filter_strings.is_empty() {
+            return None;
+        }
+        
+        let mut filters = Vec::new();
+        
+        for filter_str in filter_strings {
+            // Parse format: [direction][.packet_name]
+            // direction: c (clientbound), s (serverbound), a (all), or empty (all)
+            // packet_name: optional, delimited by period
+            // packet_name can contain * for wildcard matching
+            
+            let filter_str = filter_str.trim();
+            if filter_str.is_empty() {
+                continue;
+            }
+            
+            let (direction_char, packet_name) = if let Some(dot_pos) = filter_str.find('.') {
+                let dir = &filter_str[..dot_pos];
+                let name = &filter_str[dot_pos + 1..];
+                (dir, Some(name.to_string()))
+            } else {
+                (filter_str, None)
+            };
+            
+            let direction = match direction_char.to_lowercase().as_str() {
+                "c" => Some(FilterPacketDirection::Clientbound),
+                "s" => Some(FilterPacketDirection::Serverbound),
+                "a" | "" => None, // "a" or empty means all directions
+                _ => {
+                    // Invalid direction - skip this filter
+                    continue;
+                }
+            };
+            
+            // Check if packet_name contains wildcards (*)
+            let packet_name_is_wildcard = packet_name.as_ref()
+                .map(|name| name.contains('*'))
+                .unwrap_or(false);
+            
+            filters.push(PacketFilter {
+                direction,
+                packet_name,
+                packet_name_is_wildcard,
+            });
+        }
+        
+        if filters.is_empty() {
+            None
+        } else {
+            Some(PacketFilterSet { filters })
         }
     }
 
@@ -626,11 +717,9 @@ async fn main() -> Result<()> {
                                 KeyCode::Char('f') | KeyCode::Char('F') => {
                                     // Enter filter input mode
                                     // Initialize filter input with current filter if one exists
-                                    app.filter_input = match app.current_filter {
-                                        Some(PacketDirectionFilter::Clientbound) => "c".to_string(),
-                                        Some(PacketDirectionFilter::Serverbound) => "s".to_string(),
-                                        Some(PacketDirectionFilter::All) | None => "a".to_string(),
-                                    };
+                                    app.filter_input = app.current_filter.as_ref()
+                                        .map(|f| f.to_string())
+                                        .unwrap_or_else(|| "a".to_string());
                                     app.mode = ViewerMode::FilterInput;
                                 }
                                 _ => {}
@@ -640,11 +729,9 @@ async fn main() -> Result<()> {
                             match key.code {
                                 KeyCode::Esc => {
                                     // Cancel filter - revert filter input to current filter
-                                    app.filter_input = match app.current_filter {
-                                        Some(PacketDirectionFilter::Clientbound) => "c".to_string(),
-                                        Some(PacketDirectionFilter::Serverbound) => "s".to_string(),
-                                        Some(PacketDirectionFilter::All) | None => "a".to_string(),
-                                    };
+                                    app.filter_input = app.current_filter.as_ref()
+                                        .map(|f| f.to_string())
+                                        .unwrap_or_else(|| "a".to_string());
                                     app.mode = ViewerMode::PacketView;
                                 }
                                 KeyCode::Enter => {
@@ -667,7 +754,7 @@ async fn main() -> Result<()> {
                                     // Reload session with new filter
                                     if let Some((session, _)) = app.sessions.get(app.selected_session) {
                                         app.is_loading = true;
-                                        let filter_to_apply = app.current_filter;
+                                        let filter_to_apply = app.current_filter.clone();
                                         let result = SessionLog::load(&app.db, session.id, filter_to_apply).await;
                                         app.is_loading = false;
                                         
@@ -701,10 +788,8 @@ async fn main() -> Result<()> {
                                     app.filter_input.pop();
                                 }
                                 KeyCode::Char(c) => {
-                                    // Only allow single character filter input
-                                    if app.filter_input.is_empty() {
-                                        app.filter_input.push(c);
-                                    }
+                                    // Allow multi-character input for filter strings
+                                    app.filter_input.push(c);
                                 }
                                 _ => {}
                             }
@@ -799,7 +884,7 @@ fn render_packet_view(f: &mut Frame, app: &mut ViewerApp) {
         .direction(ratatui::layout::Direction::Vertical)
         .constraints([
             Constraint::Length(3), // Header
-            Constraint::Length(5), // Filter panel (taller to fit text)
+            Constraint::Length(6), // Filter panel (taller to fit longer help text)
             Constraint::Length(3), // Timeline
             Constraint::Min(0),    // Packet details
         ])
@@ -818,11 +903,9 @@ fn render_packet_view(f: &mut Frame, app: &mut ViewerApp) {
     };
 
     let view_mode = if app.show_hex { "HEX" } else { "JSON" };
-    let filter_str = match app.current_filter {
-        Some(PacketDirectionFilter::Clientbound) => " [Filter: Clientbound]",
-        Some(PacketDirectionFilter::Serverbound) => " [Filter: Serverbound]",
-        Some(PacketDirectionFilter::All) | None => "",
-    };
+    let filter_str = app.current_filter.as_ref()
+        .map(|f| format!(" [Filter: {}]", f.to_string()))
+        .unwrap_or_else(|| String::new());
     let compare_str = if app.compare_mode {
         format!(" [Compare Mode | Baseline: Packet {}]", 
             app.baseline_packet_index.map(|i| i + 1).unwrap_or(0))
@@ -1302,13 +1385,13 @@ fn hex_dump(data: &[u8], bytes_per_line: usize) -> String {
 
 fn render_filter_panel(f: &mut Frame, area: Rect, app: &ViewerApp) {
     let filter_text = format!("Filter: {}", app.filter_input);
-    let help_text = "c = clientbound, s = serverbound, a = all | Enter to apply, Esc to cancel";
+    let help_text = "Format: [c|s|a][.packet_name][,filter2,...] | Examples: s.player_auth_input, c.start_game, s.*action* | Enter to apply, Esc to cancel";
     
     let chunks = Layout::default()
         .direction(ratatui::layout::Direction::Vertical)
         .constraints([
             Constraint::Length(3), // Input line (with border, needs 3 lines)
-            Constraint::Length(2), // Help text
+            Constraint::Length(3), // Help text (increased for longer text)
         ])
         .split(area);
     
