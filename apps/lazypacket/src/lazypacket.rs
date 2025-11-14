@@ -552,31 +552,121 @@ fn format_json_diff(diff: &JsonDiff, path: &str, indent: usize) -> Vec<(String, 
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Load .env file - try multiple locations
-    // 1. Current working directory
-    // 2. Two levels up (project root when running from apps/lazypacket/)
-    // 3. One level up (when running from project root)
-    let env_locations = [
-        ".env",
-        "../../.env",
-        "../.env",
-    ];
+    // Load .env file - find project root first
+    // Look for project root by finding pnpm-workspace.yaml or root Cargo.toml/package.json
+    let current_dir = std::env::current_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+    
+    let mut project_root = None;
+    let mut search_dir = current_dir.as_path();
+    
+    // Walk up the directory tree to find project root
+    loop {
+        let pnpm_workspace = search_dir.join("pnpm-workspace.yaml");
+        let root_package_json = search_dir.join("package.json");
+        let root_cargo_toml = search_dir.join("Cargo.toml");
+        
+        if pnpm_workspace.exists() || root_package_json.exists() || root_cargo_toml.exists() {
+            project_root = Some(search_dir.to_path_buf());
+            break;
+        }
+        
+        // Go up one level
+        match search_dir.parent() {
+            Some(parent) => search_dir = parent,
+            None => break, // Reached filesystem root
+        }
+    }
     
     let mut loaded = false;
-    for location in &env_locations {
-        let path = std::path::Path::new(location);
-        if path.exists() {
-            if let Ok(_) = dotenv::from_path(path) {
-                loaded = true;
-                break;
+    let mut env_path_used = None;
+    
+    // Try loading from project root first
+    if let Some(root) = &project_root {
+        let env_path = root.join(".env");
+        if env_path.exists() {
+            match dotenv::from_path(&env_path) {
+                Ok(_) => {
+                    loaded = true;
+                    env_path_used = Some(env_path.clone());
+                }
+                Err(e) => {
+                    eprintln!("Warning: Failed to load .env from project root {:?}: {}", env_path, e);
+                }
             }
         }
     }
     
-    // Also try dotenv's default behavior (current dir)
+    // Fallback: try multiple relative locations
     if !loaded {
-        dotenv::dotenv().ok();
+        let env_locations = [
+            ".env",
+            "../../.env",
+            "../.env",
+        ];
+        
+        for location in &env_locations {
+            let path = std::path::Path::new(location);
+            if path.exists() {
+                match dotenv::from_path(path) {
+                    Ok(_) => {
+                        loaded = true;
+                        env_path_used = Some(path.to_path_buf());
+                        break;
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: Failed to load .env from {:?}: {}", path, e);
+                    }
+                }
+            }
+        }
     }
+    
+    // Final fallback: dotenv's default behavior (current dir)
+    if !loaded {
+        match dotenv::dotenv() {
+            Ok(path) => {
+                env_path_used = Some(path);
+                loaded = true;
+            }
+            Err(e) => {
+                eprintln!("Warning: Failed to load .env from current directory: {}", e);
+            }
+        }
+    }
+    
+    // Debug: Print which .env file was loaded and verify DB_HOST
+    if let Some(ref path) = env_path_used {
+        eprintln!("Loaded .env from: {}", path.display());
+        
+        // Manually read and set environment variables to ensure they override existing ones
+        // This is necessary because dotenv doesn't override existing env vars by default
+        if let Ok(contents) = std::fs::read_to_string(path) {
+            for line in contents.lines() {
+                let line = line.trim();
+                // Skip comments and empty lines
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                // Parse KEY=VALUE format
+                if let Some(equal_pos) = line.find('=') {
+                    let key = line[..equal_pos].trim();
+                    let value = line[equal_pos + 1..].trim();
+                    // Remove quotes if present
+                    let value = value.trim_matches(|c: char| c == '"' || c == '\'');
+                    // Set the environment variable (this will override any existing value)
+                    std::env::set_var(key, value);
+                }
+            }
+        }
+    } else {
+        eprintln!("Warning: No .env file was loaded");
+    }
+    
+    // Verify DB_HOST was loaded (for debugging)
+    let db_host = std::env::var("DB_HOST").unwrap_or_else(|_| "not set".to_string());
+    let db_port = std::env::var("DB_PORT").unwrap_or_else(|_| "not set".to_string());
+    eprintln!("DB_HOST={}, DB_PORT={}", db_host, db_port);
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
