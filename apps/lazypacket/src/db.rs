@@ -302,4 +302,17 @@ impl Database {
 
         Ok(tags)
     }
+
+    pub async fn delete_session(&self, session_id: i32) -> Result<()> {
+        // Delete session - CASCADE will automatically delete associated packets and tag_maps
+        self.client
+            .execute(
+                "DELETE FROM sessions WHERE id = $1",
+                &[&session_id],
+            )
+            .await
+            .context("Failed to delete session")?;
+
+        Ok(())
+    }
 }

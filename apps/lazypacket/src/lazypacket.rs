@@ -126,6 +126,7 @@ impl SessionLog {
 
 enum ConfirmationAction {
     DeleteTag { session_id: i32, tag: String },
+    DeleteSession { session_id: i32 },
     // Add more action types as needed
 }
 
@@ -646,6 +647,18 @@ async fn main() -> Result<()> {
                                         app.mode = ViewerMode::TagManagement;
                                     }
                                 }
+                                KeyCode::Char('d') => {
+                                    // Delete selected session
+                                    if let Some((session, _, _)) = app.sessions.get(app.selected_session) {
+                                        app.confirmation_dialog = Some(ConfirmationDialogState {
+                                            message: format!("Delete session #{}? This will also delete all associated packets and tags.", session.id),
+                                            action: ConfirmationAction::DeleteSession {
+                                                session_id: session.id,
+                                            },
+                                        });
+                                        app.mode = ViewerMode::ConfirmationDialog;
+                                    }
+                                }
                                 _ => {}
                             }
                         }
@@ -964,6 +977,41 @@ async fn main() -> Result<()> {
                                                     app.mode = ViewerMode::SessionList;
                                                 }
                                             }
+                                            ConfirmationAction::DeleteSession { session_id } => {
+                                                match app.db.delete_session(session_id).await {
+                                                    Ok(_) => {
+                                                        // Remove session from list
+                                                        app.sessions.retain(|(s, _, _)| s.id != session_id);
+                                                        
+                                                        // Adjust selected index if needed
+                                                        if app.selected_session >= app.sessions.len() && !app.sessions.is_empty() {
+                                                            app.selected_session = app.sessions.len() - 1;
+                                                        } else if app.sessions.is_empty() {
+                                                            app.selected_session = 0;
+                                                        }
+                                                        
+                                                        // Clear current log if it was the deleted session
+                                                        if let Some(ref log) = app.current_log {
+                                                            if log.session_id == session_id {
+                                                                app.current_log = None;
+                                                                app.mode = ViewerMode::SessionList;
+                                                            }
+                                                        }
+                                                        
+                                                        // Close tag management if it was for the deleted session
+                                                        if let Some(ref tag_mgmt) = app.tag_management {
+                                                            if tag_mgmt.session_id == session_id {
+                                                                app.tag_management = None;
+                                                            }
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        app.error_message = Some(format!("Failed to delete session: {}", e));
+                                                    }
+                                                }
+                                                // Return to session list
+                                                app.mode = ViewerMode::SessionList;
+                                            }
                                         }
                                     }
                                 }
@@ -1058,7 +1106,7 @@ fn render_session_list(f: &mut Frame, app: &mut ViewerApp) {
     list_state.select(Some(app.selected_session));
 
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title("Session Logs (↑↓ to navigate, Enter to select, t to tag, q to quit)"))
+        .block(Block::default().borders(Borders::ALL).title("Session Logs (↑↓ to navigate, Enter to select, t to tag, d to delete, q to quit)"))
         .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
     
     f.render_stateful_widget(list, main_area, &mut list_state);
