@@ -121,6 +121,139 @@ This project implements a Minecraft Bedrock Edition proxy in Rust that:
 2. Update log reading code to handle both old and new formats
 3. Test with existing log files to ensure compatibility
 
+### Adding Database Functionality (Database-First Changes)
+
+#### Step 1: Add Database Functions (`apps/lazypacket/src/db.rs`)
+- Add async functions to `Database` impl block
+- Functions should return `Result<T>` and use `.context()` for error messages
+- Follow existing patterns (e.g., `get_sessions()`, `get_packets()`)
+- Use parameterized queries with `$1`, `$2`, etc. for safety
+- Example pattern:
+  ```rust
+  pub async fn new_function(&self, param: Type) -> Result<ReturnType> {
+      let rows = self.client
+          .query("SELECT ... WHERE id = $1", &[&param])
+          .await
+          .context("Failed to query ...")?;
+      // Process rows and return
+  }
+  ```
+
+#### Step 2: Update Schema/DDL (if needed)
+- Update `apps/relay/.ddl/schema.sql` for new tables/columns
+- Create migration file in `apps/relay/.ddl/` following naming pattern `NN_migrate_description.sql`
+- Migration files should be idempotent (use `IF NOT EXISTS`, `ON CONFLICT DO NOTHING`, etc.)
+
+### Adding UI Features (UI-First Changes)
+
+#### Step 1: Define State Structures
+- Add new mode to `ViewerMode` enum if needed (e.g., `TagManagement`, `ConfirmationDialog`)
+- Create state structs for modals/management views:
+  ```rust
+  struct FeatureState {
+      // State fields
+  }
+  ```
+- Add state to `ViewerApp` struct:
+  ```rust
+  feature_state: Option<FeatureState>,
+  ```
+
+#### Step 2: Add Confirmation Actions (if using confirmation dialog)
+- Add variant to `ConfirmationAction` enum:
+  ```rust
+  enum ConfirmationAction {
+      DeleteTag { session_id: i32, tag: String },
+      DeleteSession { session_id: i32 },
+      // Add new actions here
+  }
+  ```
+- Add `confirmation_dialog: Option<ConfirmationDialogState>` to `ViewerApp` if not present
+
+#### Step 3: Initialize State in `ViewerApp::new()`
+- Initialize new state fields (usually `None` or empty)
+- Load initial data if needed (e.g., tags for sessions)
+
+#### Step 4: Add Keyboard Handlers
+- Add handler in main event loop matching on `app.mode`
+- For new modes, add `match` branch:
+  ```rust
+  ViewerMode::NewMode => {
+      match key.code {
+          KeyCode::Esc => { /* cleanup and return */ }
+          // Handle other keys
+      }
+  }
+  ```
+- For confirmation dialog:
+  ```rust
+  ViewerMode::ConfirmationDialog => {
+      match key.code {
+          KeyCode::Esc | KeyCode::Char('n') => { /* cancel */ }
+          KeyCode::Enter | KeyCode::Char('y') => {
+              // Execute action based on ConfirmationAction variant
+          }
+      }
+  }
+  ```
+
+#### Step 5: Create Rendering Functions
+- Create rendering function: `fn render_feature(f: &mut Frame, app: &mut ViewerApp)`
+- Use `centered_rect()` helper for modals (percentage width/height)
+- For confirmation dialog: `fn render_confirmation_dialog(f: &mut Frame, app: &mut ViewerApp)`
+- Update `ui()` function to route to new renderer based on mode
+
+#### Step 6: Update Help Text
+- Update help text in relevant UI components to show new keyboard shortcuts
+- Example: Session list title includes "d to delete, t to tag"
+
+### Reusable Patterns
+
+#### Confirmation Dialog Pattern
+1. Set `confirmation_dialog` state with message and action:
+   ```rust
+   app.confirmation_dialog = Some(ConfirmationDialogState {
+       message: format!("Confirm action?"),
+       action: ConfirmationAction::ActionType { params },
+   });
+   app.mode = ViewerMode::ConfirmationDialog;
+   ```
+2. Handle confirmation in `ConfirmationDialog` mode handler
+3. Dialog renders as overlay on underlying view
+4. After confirmation, return to appropriate mode (check `tag_management` or default to `SessionList`)
+
+#### Modal Pattern
+1. Create state struct with fields needed for modal
+2. Add `Option<StateStruct>` to `ViewerApp`
+3. Initialize state when entering modal (e.g., load data)
+4. Create rendering function that uses `centered_rect()` for positioning
+5. Handle keyboard input in modal mode
+6. Clean up state when closing modal
+
+#### List Navigation Pattern
+- Use `selected_index` in state struct
+- Handle `Up`/`Down` keys to adjust index
+- Clamp index: `index.min(list.len().saturating_sub(1))`
+- Handle empty list case
+
+### Common Pitfalls to Avoid
+
+1. **Borrow Checker Issues**: When calling methods that need mutable `app` borrow while holding mutable borrow of nested state, extract values first:
+   ```rust
+   let session_id = tag_mgmt.session_id; // Extract before async call
+   app.db.operation(session_id).await?; // Now safe
+   ```
+
+2. **State Cleanup**: Always clean up modal state when closing (set to `None`)
+
+3. **Index Bounds**: Always check bounds when adjusting selected indices after deletions
+
+4. **Mode Transitions**: Ensure mode transitions are clear and don't leave dangling state
+
+5. **Error Handling**: Show errors in `error_message` field, don't silently fail
+
+6. **UI Updates**: After database operations, refresh both in-memory state and session list if needed
+
 ## Configuration
 
 ### Environment Variables

@@ -219,4 +219,100 @@ impl Database {
 
         Ok(packets)
     }
+
+    pub async fn get_session_tags(&self, session_id: i32) -> Result<Vec<String>> {
+        let rows = self
+            .client
+            .query(
+                "SELECT tag FROM tag_maps WHERE session_id = $1 ORDER BY tag",
+                &[&session_id],
+            )
+            .await
+            .context("Failed to query session tags")?;
+
+        let mut tags = Vec::new();
+        for row in rows {
+            tags.push(row.get(0));
+        }
+
+        Ok(tags)
+    }
+
+    pub async fn add_session_tag(&self, session_id: i32, tag: &str) -> Result<()> {
+        // First, ensure the tag exists in the tags table
+        self.client
+            .execute(
+                "INSERT INTO tags (tag) VALUES ($1) ON CONFLICT (tag) DO NOTHING",
+                &[&tag],
+            )
+            .await
+            .context("Failed to insert tag")?;
+
+        // Check if tag mapping already exists
+        let exists = self
+            .client
+            .query_one(
+                "SELECT COUNT(*) FROM tag_maps WHERE tag = $1 AND session_id = $2",
+                &[&tag, &session_id],
+            )
+            .await
+            .context("Failed to check tag mapping")?;
+        
+        let count: i64 = exists.get(0);
+        if count == 0 {
+            // Create the tag mapping only if it doesn't exist
+            self.client
+                .execute(
+                    "INSERT INTO tag_maps (tag, session_id) VALUES ($1, $2)",
+                    &[&tag, &session_id],
+                )
+                .await
+                .context("Failed to create tag mapping")?;
+        }
+
+        Ok(())
+    }
+
+    pub async fn remove_session_tag(&self, session_id: i32, tag: &str) -> Result<()> {
+        self.client
+            .execute(
+                "DELETE FROM tag_maps WHERE session_id = $1 AND tag = $2",
+                &[&session_id, &tag],
+            )
+            .await
+            .context("Failed to remove tag mapping")?;
+
+        Ok(())
+    }
+
+    pub async fn get_all_tags(&self) -> Result<Vec<String>> {
+        let rows = self
+            .client
+            .query(
+                "SELECT tag FROM tags ORDER BY tag",
+                &[],
+            )
+            .await
+            .context("Failed to query all tags")?;
+
+        let mut tags = Vec::new();
+        for row in rows {
+            tags.push(row.get(0));
+        }
+
+        Ok(tags)
+    }
+
+    pub async fn delete_session(&self, session_id: i32) -> Result<()> {
+        // Delete session - CASCADE will automatically delete associated packets and tag_maps
+        self.client
+            .execute(
+                "DELETE FROM sessions WHERE id = $1",
+                &[&session_id],
+            )
+            .await
+            .context("Failed to delete session")?;
+
+        Ok(())
+    }
 }

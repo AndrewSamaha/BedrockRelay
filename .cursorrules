@@ -107,3 +107,42 @@
 - No data retention/cleanup policies yet
 - Indexes will be added based on query patterns
 - No partitioning strategy yet (may be needed for high volume)
+
+### Database Schema Changes Workflow
+
+When adding new tables or modifying schema:
+
+1. **Update Schema File** (`apps/relay/.ddl/schema.sql`):
+   - Add new table definitions with `CREATE TABLE IF NOT EXISTS`
+   - Add indexes with `CREATE INDEX IF NOT EXISTS`
+   - Use appropriate constraints (PRIMARY KEY, FOREIGN KEY, CHECK, etc.)
+   - Follow existing naming conventions
+
+2. **Create Migration File** (`apps/relay/.ddl/NN_migrate_description.sql`):
+   - Follow naming pattern: `01_migrate_timestamp_to_ts.sql`, `02_migrate_add_tags_table.sql`, etc.
+   - Include comments explaining the migration
+   - Make migrations idempotent (use `IF NOT EXISTS`, `ON CONFLICT DO NOTHING`)
+   - Example structure:
+     ```sql
+     -- Migration: Description
+     -- Run this manually if you have an existing database with the old schema
+     
+     -- Create new table
+     CREATE TABLE IF NOT EXISTS new_table (...);
+     
+     -- Create indexes
+     CREATE INDEX IF NOT EXISTS idx_new_table_column ON new_table(column);
+     
+     -- Seed data (optional)
+     INSERT INTO table (column) VALUES ('value') ON CONFLICT DO NOTHING;
+     ```
+
+3. **Update Both Applications**:
+   - **Relay (JavaScript)**: Update database code in `apps/relay/src/lib/db/` if needed
+   - **Lazypacket (Rust)**: Update database code in `apps/lazypacket/src/db.rs` if needed
+   - Both should use the same schema
+
+4. **Test Migration**:
+   - Test on fresh database (schema.sql should create everything)
+   - Test migration on existing database (migration file should work)
+   - Verify both applications can connect and query new schema
