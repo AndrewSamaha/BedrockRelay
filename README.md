@@ -130,11 +130,35 @@ This monorepo uses [Turborepo](https://turbo.build/repo) for:
 
 ## Database
 
-The relay stores packets in PostgreSQL:
-- **sessions**: Tracks client sessions with start/end times
-- **packets**: Stores all packets with session reference, timestamps, and JSONB packet data
+The relay stores packets in PostgreSQL with the following tables:
 
-See `apps/relay/.ddl/schema.sql` for the full schema.
+- **sessions**: Tracks client sessions with start/end times
+  - `id`: Auto-increment primary key
+  - `started_at`: Session start timestamp
+  - `ended_at`: Session end timestamp (nullable)
+
+- **packets**: Stores all packets with session reference, timestamps, and JSONB packet data
+  - `id`: Auto-increment primary key
+  - `session_id`: Foreign key to sessions table
+  - `ts`: Packet timestamp
+  - `session_time_ms`: Session time in milliseconds
+  - `packet_number`: Sequential packet number
+  - `server_version`: Server version string
+  - `direction`: Packet direction ('clientbound' or 'serverbound')
+  - `packet`: JSONB packet data
+
+- **tags**: Master table of unique tag strings (prevents typos and duplicates)
+  - `tag`: VARCHAR(255) primary key (the tag string itself)
+
+- **tag_maps**: Maps tags to sessions or packets
+  - `id`: Auto-increment primary key
+  - `tag`: Foreign key to tags table
+  - `packet_id`: Foreign key to packets table (nullable)
+  - `session_id`: Foreign key to sessions table (nullable)
+  - `created_at`: Timestamp when tag was applied
+  - Constraint: Exactly one of `packet_id` or `session_id` must be set
+
+See `apps/relay/.ddl/schema.sql` for the full schema and `apps/relay/.ddl/` for migration files.
 
 ## License
 
