@@ -160,6 +160,26 @@ The relay stores packets in PostgreSQL with the following tables:
 
 See `apps/relay/.ddl/schema.sql` for the full schema and `apps/relay/.ddl/` for migration files.
 
+### Exporting and Importing data from the db
+Sometimes it is helpful to move data from one db to anoter (e.g., when developing
+across different environments). Here are some scripts to help.
+
+Dependency Installation
+```bash
+sudo apt install postgresql-client-common
+sudo apt install postgresql-client
+```
+
+Exporting from a db:
+```bash
+pg_dump "postgresql://postgres:postgres@192.168.1.177:6432/postgres" -Fc -f remote_db.dump
+```
+
+Importing from a file:
+```bash
+pg_restore -h localhost -p 6432 -U postgres -d postgres --clean --no-owner ./remote_db.dump
+```
+
 ## License
 
 ISC
