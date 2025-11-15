@@ -124,6 +124,11 @@ impl SessionLog {
     }
 }
 
+enum ConfirmationAction {
+    DeleteTag { session_id: i32, tag: String },
+    // Add more action types as needed
+}
+
 struct ViewerApp {
     db: Database,
     sessions: Vec<(DbSession, usize, Vec<String>)>, // session, packet_count, tags
@@ -144,14 +149,28 @@ struct ViewerApp {
     baseline_packet_index: Option<usize>, // Index of baseline packet for comparison
     baseline_packet_json: Option<serde_json::Value>, // JSON of baseline packet
     tag_input: String, // Current tag input text
-    tag_input_mode: bool, // Whether we're in tag input mode
+    tag_management: Option<TagManagementState>, // Tag management modal state
+    confirmation_dialog: Option<ConfirmationDialogState>, // Confirmation dialog state
+}
+
+struct TagManagementState {
+    session_id: i32,
+    tags: Vec<String>,
+    selected_tag_index: usize,
+    add_tag_mode: bool, // Whether we're in add tag input mode
+}
+
+struct ConfirmationDialogState {
+    message: String,
+    action: ConfirmationAction,
 }
 
 enum ViewerMode {
     SessionList,
     PacketView,
     FilterInput,
-    TagInput,
+    TagManagement,
+    ConfirmationDialog,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -209,7 +228,8 @@ impl ViewerApp {
             baseline_packet_index: None,
             baseline_packet_json: None,
             tag_input: String::new(),
-            tag_input_mode: false,
+            tag_management: None,
+            confirmation_dialog: None,
         })
     }
 
@@ -613,10 +633,18 @@ async fn main() -> Result<()> {
                                     }
                                 }
                                 KeyCode::Char('t') => {
-                                    // Enter tag input mode
-                                    app.tag_input = String::new();
-                                    app.tag_input_mode = true;
-                                    app.mode = ViewerMode::TagInput;
+                                    // Enter tag management modal
+                                    if let Some((session, _, _)) = app.sessions.get(app.selected_session) {
+                                        let tags = app.db.get_session_tags(session.id).await.unwrap_or_default();
+                                        app.tag_management = Some(TagManagementState {
+                                            session_id: session.id,
+                                            tags,
+                                            selected_tag_index: 0,
+                                            add_tag_mode: false,
+                                        });
+                                        app.tag_input = String::new();
+                                        app.mode = ViewerMode::TagManagement;
+                                    }
                                 }
                                 _ => {}
                             }
@@ -798,42 +826,146 @@ async fn main() -> Result<()> {
                                 _ => {}
                             }
                         }
-                        ViewerMode::TagInput => {
-                            match key.code {
-                                KeyCode::Esc => {
-                                    // Cancel tag input
-                                    app.tag_input = String::new();
-                                    app.tag_input_mode = false;
-                                    app.mode = ViewerMode::SessionList;
-                                }
-                                KeyCode::Enter => {
-                                    // Add tag to selected session
-                                    let tag = app.tag_input.trim().to_string();
-                                    if !tag.is_empty() {
-                                        if let Some((session, _, _)) = app.sessions.get(app.selected_session) {
-                                            match app.db.add_session_tag(session.id, &tag).await {
-                                                Ok(_) => {
-                                                    // Refresh tags for this session
-                                                    if let Err(e) = app.refresh_session_tags(session.id).await {
-                                                        app.error_message = Some(format!("Failed to refresh tags: {}", e));
+                        ViewerMode::TagManagement => {
+                            if let Some(ref mut tag_mgmt) = app.tag_management {
+                                if tag_mgmt.add_tag_mode {
+                                    // In add tag input mode
+                                    match key.code {
+                                        KeyCode::Esc => {
+                                            tag_mgmt.add_tag_mode = false;
+                                            app.tag_input = String::new();
+                                        }
+                                        KeyCode::Enter => {
+                                            let tag = app.tag_input.trim().to_string();
+                                            if !tag.is_empty() {
+                                                let session_id = tag_mgmt.session_id;
+                                                let add_result = app.db.add_session_tag(session_id, &tag).await;
+                                                
+                                                // Drop mutable borrow of tag_mgmt before calling refresh_session_tags
+                                                match add_result {
+                                                    Ok(_) => {
+                                                        // Refresh tags in tag management
+                                                        if let Ok(updated_tags) = app.db.get_session_tags(session_id).await {
+                                                            if let Some(ref mut tm) = app.tag_management {
+                                                                tm.tags = updated_tags;
+                                                                tm.add_tag_mode = false;
+                                                            }
+                                                        }
+                                                        // Update session list too
+                                                        if let Err(e) = app.refresh_session_tags(session_id).await {
+                                                            app.error_message = Some(format!("Failed to refresh tags: {}", e));
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        app.error_message = Some(format!("Failed to add tag: {}", e));
+                                                        if let Some(ref mut tm) = app.tag_management {
+                                                            tm.add_tag_mode = false;
+                                                        }
                                                     }
                                                 }
-                                                Err(e) => {
-                                                    app.error_message = Some(format!("Failed to add tag: {}", e));
+                                            } else {
+                                                tag_mgmt.add_tag_mode = false;
+                                            }
+                                            app.tag_input = String::new();
+                                        }
+                                        KeyCode::Backspace => {
+                                            app.tag_input.pop();
+                                        }
+                                        KeyCode::Char(c) => {
+                                            app.tag_input.push(c);
+                                        }
+                                        _ => {}
+                                    }
+                                } else {
+                                    // In tag list mode
+                                    match key.code {
+                                        KeyCode::Esc | KeyCode::Char('q') => {
+                                            app.tag_management = None;
+                                            app.mode = ViewerMode::SessionList;
+                                        }
+                                        KeyCode::Up => {
+                                            if tag_mgmt.selected_tag_index > 0 {
+                                                tag_mgmt.selected_tag_index -= 1;
+                                            }
+                                        }
+                                        KeyCode::Down => {
+                                            if tag_mgmt.selected_tag_index < tag_mgmt.tags.len().saturating_sub(1) {
+                                                tag_mgmt.selected_tag_index += 1;
+                                            }
+                                        }
+                                        KeyCode::Char('d') => {
+                                            // Delete selected tag
+                                            if let Some(tag) = tag_mgmt.tags.get(tag_mgmt.selected_tag_index) {
+                                                let tag_to_delete = tag.clone();
+                                                app.confirmation_dialog = Some(ConfirmationDialogState {
+                                                    message: format!("Delete tag '{}'?", tag_to_delete),
+                                                    action: ConfirmationAction::DeleteTag {
+                                                        session_id: tag_mgmt.session_id,
+                                                        tag: tag_to_delete,
+                                                    },
+                                                });
+                                                app.mode = ViewerMode::ConfirmationDialog;
+                                            }
+                                        }
+                                        KeyCode::Char('a') => {
+                                            // Enter add tag mode
+                                            tag_mgmt.add_tag_mode = true;
+                                            app.tag_input = String::new();
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                            }
+                        }
+                        ViewerMode::ConfirmationDialog => {
+                            match key.code {
+                                KeyCode::Esc | KeyCode::Char('n') => {
+                                    // Cancel confirmation
+                                    app.confirmation_dialog = None;
+                                    // Return to previous mode
+                                    if app.tag_management.is_some() {
+                                        app.mode = ViewerMode::TagManagement;
+                                    } else {
+                                        app.mode = ViewerMode::SessionList;
+                                    }
+                                }
+                                KeyCode::Enter | KeyCode::Char('y') => {
+                                    // Confirm action
+                                    if let Some(dialog) = app.confirmation_dialog.take() {
+                                        match dialog.action {
+                                            ConfirmationAction::DeleteTag { session_id, tag } => {
+                                                match app.db.remove_session_tag(session_id, &tag).await {
+                                                    Ok(_) => {
+                                                        // Refresh tags
+                                                        if let Ok(updated_tags) = app.db.get_session_tags(session_id).await {
+                                                            if let Some(ref mut tag_mgmt) = app.tag_management {
+                                                                tag_mgmt.tags = updated_tags;
+                                                                // Adjust selected index if needed
+                                                                if tag_mgmt.selected_tag_index >= tag_mgmt.tags.len() && !tag_mgmt.tags.is_empty() {
+                                                                    tag_mgmt.selected_tag_index = tag_mgmt.tags.len() - 1;
+                                                                } else if tag_mgmt.tags.is_empty() {
+                                                                    tag_mgmt.selected_tag_index = 0;
+                                                                }
+                                                            }
+                                                            // Update session list too
+                                                            if let Err(e) = app.refresh_session_tags(session_id).await {
+                                                                app.error_message = Some(format!("Failed to refresh tags: {}", e));
+                                                            }
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        app.error_message = Some(format!("Failed to delete tag: {}", e));
+                                                    }
+                                                }
+                                                // Return to tag management
+                                                if app.tag_management.is_some() {
+                                                    app.mode = ViewerMode::TagManagement;
+                                                } else {
+                                                    app.mode = ViewerMode::SessionList;
                                                 }
                                             }
                                         }
                                     }
-                                    app.tag_input = String::new();
-                                    app.tag_input_mode = false;
-                                    app.mode = ViewerMode::SessionList;
-                                }
-                                KeyCode::Backspace => {
-                                    app.tag_input.pop();
-                                }
-                                KeyCode::Char(c) => {
-                                    // Allow multi-character input for tag strings
-                                    app.tag_input.push(c);
                                 }
                                 _ => {}
                             }
@@ -856,24 +988,27 @@ fn ui(f: &mut Frame, app: &mut ViewerApp) {
     }
     
     match app.mode {
-        ViewerMode::SessionList | ViewerMode::TagInput => render_session_list(f, app),
+        ViewerMode::SessionList => render_session_list(f, app),
         ViewerMode::PacketView | ViewerMode::FilterInput => render_packet_view(f, app),
+        ViewerMode::TagManagement => render_tag_management(f, app),
+        ViewerMode::ConfirmationDialog => {
+            // Render the underlying view first, then overlay the confirmation dialog
+            match app.tag_management {
+                Some(_) => render_tag_management(f, app),
+                _ => render_session_list(f, app),
+            }
+            render_confirmation_dialog(f, app);
+        }
     }
 }
 
 fn render_session_list(f: &mut Frame, app: &mut ViewerApp) {
     let show_error = app.error_message.is_some();
-    let show_tag_input = matches!(app.mode, ViewerMode::TagInput);
     
-    let chunks = if show_error && show_tag_input {
+    let chunks = if show_error {
         Layout::default()
             .direction(ratatui::layout::Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Length(4), Constraint::Min(0)])
-            .split(f.size())
-    } else if show_error || show_tag_input {
-        Layout::default()
-            .direction(ratatui::layout::Direction::Vertical)
-            .constraints([Constraint::Length(if show_tag_input { 4 } else { 3 }), Constraint::Min(0)])
+            .constraints([Constraint::Length(3), Constraint::Min(0)])
             .split(f.size())
     } else {
         Layout::default()
@@ -881,53 +1016,16 @@ fn render_session_list(f: &mut Frame, app: &mut ViewerApp) {
             .split(f.size())
     };
     
-    let mut chunk_idx = 0;
-    
-    // Show error message if present
-    if show_error {
+    let main_area = if show_error {
+        // Show error message if present
         let error_paragraph = Paragraph::new(app.error_message.as_ref().unwrap().as_str())
             .block(Block::default().borders(Borders::ALL).title("Error").style(Style::default().fg(Color::Red)))
             .wrap(Wrap { trim: false });
-        f.render_widget(error_paragraph, chunks[chunk_idx]);
-        chunk_idx += 1;
-    }
-    
-    // Show tag input if in tag input mode
-    if show_tag_input {
-        let tag_text = format!("Tag: {}", app.tag_input);
-        let help_text = "Enter tag name and press Enter to add, Esc to cancel";
-        
-        let tag_chunks = Layout::default()
-            .direction(ratatui::layout::Direction::Vertical)
-            .constraints([
-                Constraint::Length(3), // Input line
-                Constraint::Length(1), // Help text
-            ])
-            .split(chunks[chunk_idx]);
-        
-        let input_style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
-        
-        let input_paragraph = Paragraph::new(tag_text.as_str())
-            .block(Block::default().borders(Borders::ALL).title("Add Tag"))
-            .style(input_style);
-        f.render_widget(input_paragraph, tag_chunks[0]);
-        
-        // Show cursor
-        f.set_cursor(
-            tag_chunks[0].x + 6 + app.tag_input.len() as u16,
-            tag_chunks[0].y + 1,
-        );
-        
-        let help_paragraph = Paragraph::new(help_text)
-            .block(Block::default())
-            .style(Style::default().fg(Color::DarkGray))
-            .wrap(Wrap { trim: false });
-        f.render_widget(help_paragraph, tag_chunks[1]);
-        
-        chunk_idx += 1;
-    }
-    
-    let main_area = chunks[chunk_idx];
+        f.render_widget(error_paragraph, chunks[0]);
+        chunks[1]
+    } else {
+        chunks[0]
+    };
 
     let items: Vec<ListItem> = app
         .sessions
@@ -1532,6 +1630,124 @@ fn render_loading_indicator(f: &mut Frame, app: &ViewerApp) {
         .alignment(ratatui::layout::Alignment::Center);
     
     f.render_widget(loading_paragraph, popup_area);
+}
+
+fn render_tag_management(f: &mut Frame, app: &mut ViewerApp) {
+    if let Some(ref mut tag_mgmt) = app.tag_management {
+        // Create modal area (centered, 60% width, 70% height)
+        let modal_area = centered_rect(60, 70, f.size());
+        
+        let chunks = Layout::default()
+            .direction(ratatui::layout::Direction::Vertical)
+            .constraints([
+                Constraint::Length(3), // Title
+                Constraint::Min(0),     // Tag list or add input
+                Constraint::Length(3),  // Help text
+            ])
+            .split(modal_area);
+        
+        // Title
+        let title = Paragraph::new(format!("Tags for Session #{}", tag_mgmt.session_id))
+            .block(Block::default().borders(Borders::ALL).title("Tag Management"))
+            .alignment(ratatui::layout::Alignment::Center);
+        f.render_widget(title, chunks[0]);
+        
+        if tag_mgmt.add_tag_mode {
+            // Add tag input mode
+            let tag_text = format!("Tag: {}", app.tag_input);
+            let input_style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+            
+            let input_paragraph = Paragraph::new(tag_text.as_str())
+                .block(Block::default().borders(Borders::ALL).title("Add Tag"))
+                .style(input_style);
+            f.render_widget(input_paragraph, chunks[1]);
+            
+            // Show cursor
+            f.set_cursor(
+                chunks[1].x + 6 + app.tag_input.len() as u16,
+                chunks[1].y + 1,
+            );
+            
+            let help_text = "Enter tag name and press Enter to add, Esc to cancel";
+            let help_paragraph = Paragraph::new(help_text)
+                .block(Block::default())
+                .style(Style::default().fg(Color::DarkGray))
+                .wrap(Wrap { trim: false });
+            f.render_widget(help_paragraph, chunks[2]);
+        } else {
+            // Tag list mode
+            let items: Vec<ListItem> = if tag_mgmt.tags.is_empty() {
+                vec![ListItem::new("(No tags)")]
+            } else {
+                tag_mgmt.tags
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, tag)| {
+                        let text = if idx == tag_mgmt.selected_tag_index {
+                            format!("> {}", tag)
+                        } else {
+                            format!("  {}", tag)
+                        };
+                        ListItem::new(text)
+                    })
+                    .collect()
+            };
+            
+            use ratatui::widgets::ListState;
+            let mut list_state = ListState::default();
+            if !tag_mgmt.tags.is_empty() {
+                list_state.select(Some(tag_mgmt.selected_tag_index));
+            }
+            
+            let list = List::new(items)
+                .block(Block::default().borders(Borders::ALL).title("Tags"))
+                .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+            
+            f.render_stateful_widget(list, chunks[1], &mut list_state);
+            
+            let help_text = "↑↓: navigate | a: add tag | d: delete tag | Esc/q: close";
+            let help_paragraph = Paragraph::new(help_text)
+                .block(Block::default())
+                .style(Style::default().fg(Color::DarkGray))
+                .wrap(Wrap { trim: false });
+            f.render_widget(help_paragraph, chunks[2]);
+        }
+    }
+}
+
+fn render_confirmation_dialog(f: &mut Frame, app: &mut ViewerApp) {
+    if let Some(ref dialog) = app.confirmation_dialog {
+        // Create centered dialog (40% width, 20% height)
+        let dialog_area = centered_rect(40, 20, f.size());
+        
+        let chunks = Layout::default()
+            .direction(ratatui::layout::Direction::Vertical)
+            .constraints([
+                Constraint::Min(0),     // Message
+                Constraint::Length(1),  // Buttons
+            ])
+            .split(dialog_area);
+        
+        // Message
+        let message_lines: Vec<Line> = dialog.message
+            .lines()
+            .map(|l| Line::from(l))
+            .collect();
+        
+        let message_paragraph = Paragraph::new(message_lines)
+            .block(Block::default().borders(Borders::ALL).title("Confirm"))
+            .wrap(Wrap { trim: false })
+            .alignment(ratatui::layout::Alignment::Center);
+        f.render_widget(message_paragraph, chunks[0]);
+        
+        // Buttons
+        let button_text = "[Y]es / [N]o (or Enter/Esc)";
+        let button_paragraph = Paragraph::new(button_text)
+            .block(Block::default())
+            .style(Style::default().fg(Color::Cyan))
+            .alignment(ratatui::layout::Alignment::Center);
+        f.render_widget(button_paragraph, chunks[1]);
+    }
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
