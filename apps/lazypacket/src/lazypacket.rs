@@ -552,31 +552,13 @@ fn format_json_diff(diff: &JsonDiff, path: &str, indent: usize) -> Vec<(String, 
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Load .env file - try multiple locations
-    // 1. Current working directory
-    // 2. Two levels up (project root when running from apps/lazypacket/)
-    // 3. One level up (when running from project root)
-    let env_locations = [
-        ".env",
-        "../../.env",
-        "../.env",
-    ];
+    // Load .env file - find project root first
     
-    let mut loaded = false;
-    for location in &env_locations {
-        let path = std::path::Path::new(location);
-        if path.exists() {
-            if let Ok(_) = dotenv::from_path(path) {
-                loaded = true;
-                break;
-            }
-        }
-    }
-    
-    // Also try dotenv's default behavior (current dir)
-    if !loaded {
-        dotenv::dotenv().ok();
-    }
+    dotenvy::dotenv().ok();
+
+    // Quick sanity check:
+    dbg!(std::env::current_dir()?);
+    dbg!(std::env::var("PROXY_DESTINATION_ADDRESS")?);
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
