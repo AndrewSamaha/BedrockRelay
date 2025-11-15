@@ -619,7 +619,7 @@ impl<'a> BinaryDecoder<'a> {
             ProtoType::VarInt64 => {
                 let value = self.read_varint64()?;
                 // JSON numbers are f64, so for large i64 we need to use string
-                if value >= 0 && value <= (i64::MAX as u64) {
+                if value <= (i64::MAX as u64) {
                     Ok(JsonValue::Number((value as i64).into()))
                 } else {
                     Ok(JsonValue::String(value.to_string()))
