@@ -126,7 +126,7 @@ impl SessionLog {
 
 struct ViewerApp {
     db: Database,
-    sessions: Vec<(DbSession, usize)>, // session, packet_count
+    sessions: Vec<(DbSession, usize, Vec<String>)>, // session, packet_count, tags
     selected_session: usize,
     current_log: Option<SessionLog>,
     packet_index: usize,
@@ -143,12 +143,15 @@ struct ViewerApp {
     compare_mode: bool, // Whether compare mode is active
     baseline_packet_index: Option<usize>, // Index of baseline packet for comparison
     baseline_packet_json: Option<serde_json::Value>, // JSON of baseline packet
+    tag_input: String, // Current tag input text
+    tag_input_mode: bool, // Whether we're in tag input mode
 }
 
 enum ViewerMode {
     SessionList,
     PacketView,
     FilterInput,
+    TagInput,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,7 +182,8 @@ impl ViewerApp {
         
         for session in db_sessions {
             let packet_count = db.get_session_packet_count(session.id).await?;
-            sessions.push((session, packet_count));
+            let tags = db.get_session_tags(session.id).await.unwrap_or_default();
+            sessions.push((session, packet_count, tags));
         }
 
         // Try to load protocol parser for default version
@@ -204,11 +208,23 @@ impl ViewerApp {
             compare_mode: false,
             baseline_packet_index: None,
             baseline_packet_json: None,
+            tag_input: String::new(),
+            tag_input_mode: false,
         })
     }
 
+    async fn refresh_session_tags(&mut self, session_id: i32) -> Result<()> {
+        let tags = self.db.get_session_tags(session_id).await?;
+        // Update tags for the session in our sessions list
+        if let Some((_, _, session_tags)) = self.sessions.iter_mut()
+            .find(|(s, _, _)| s.id == session_id) {
+            *session_tags = tags;
+        }
+        Ok(())
+    }
+
     async fn load_session(&mut self) -> Result<()> {
-        if let Some((session, _)) = self.sessions.get(self.selected_session) {
+        if let Some((session, _, _)) = self.sessions.get(self.selected_session) {
             self.is_loading = true;
             let filter = self.current_filter.clone();
             let result = SessionLog::load(&self.db, session.id, filter).await;
@@ -596,6 +612,12 @@ async fn main() -> Result<()> {
                                         app.error_message = Some(format!("Failed to load session: {}", e));
                                     }
                                 }
+                                KeyCode::Char('t') => {
+                                    // Enter tag input mode
+                                    app.tag_input = String::new();
+                                    app.tag_input_mode = true;
+                                    app.mode = ViewerMode::TagInput;
+                                }
                                 _ => {}
                             }
                         }
@@ -734,7 +756,7 @@ async fn main() -> Result<()> {
                                     app.mode = ViewerMode::PacketView;
                                     
                                     // Reload session with new filter
-                                    if let Some((session, _)) = app.sessions.get(app.selected_session) {
+                                    if let Some((session, _, _)) = app.sessions.get(app.selected_session) {
                                         app.is_loading = true;
                                         let filter_to_apply = app.current_filter.clone();
                                         let result = SessionLog::load(&app.db, session.id, filter_to_apply).await;
@@ -776,6 +798,46 @@ async fn main() -> Result<()> {
                                 _ => {}
                             }
                         }
+                        ViewerMode::TagInput => {
+                            match key.code {
+                                KeyCode::Esc => {
+                                    // Cancel tag input
+                                    app.tag_input = String::new();
+                                    app.tag_input_mode = false;
+                                    app.mode = ViewerMode::SessionList;
+                                }
+                                KeyCode::Enter => {
+                                    // Add tag to selected session
+                                    let tag = app.tag_input.trim().to_string();
+                                    if !tag.is_empty() {
+                                        if let Some((session, _, _)) = app.sessions.get(app.selected_session) {
+                                            match app.db.add_session_tag(session.id, &tag).await {
+                                                Ok(_) => {
+                                                    // Refresh tags for this session
+                                                    if let Err(e) = app.refresh_session_tags(session.id).await {
+                                                        app.error_message = Some(format!("Failed to refresh tags: {}", e));
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    app.error_message = Some(format!("Failed to add tag: {}", e));
+                                                }
+                                            }
+                                        }
+                                    }
+                                    app.tag_input = String::new();
+                                    app.tag_input_mode = false;
+                                    app.mode = ViewerMode::SessionList;
+                                }
+                                KeyCode::Backspace => {
+                                    app.tag_input.pop();
+                                }
+                                KeyCode::Char(c) => {
+                                    // Allow multi-character input for tag strings
+                                    app.tag_input.push(c);
+                                }
+                                _ => {}
+                            }
+                        }
                     }
                 }
             }
@@ -794,16 +856,24 @@ fn ui(f: &mut Frame, app: &mut ViewerApp) {
     }
     
     match app.mode {
-        ViewerMode::SessionList => render_session_list(f, app),
+        ViewerMode::SessionList | ViewerMode::TagInput => render_session_list(f, app),
         ViewerMode::PacketView | ViewerMode::FilterInput => render_packet_view(f, app),
     }
 }
 
-fn render_session_list(f: &mut Frame, app: &ViewerApp) {
-    let chunks = if app.error_message.is_some() {
+fn render_session_list(f: &mut Frame, app: &mut ViewerApp) {
+    let show_error = app.error_message.is_some();
+    let show_tag_input = matches!(app.mode, ViewerMode::TagInput);
+    
+    let chunks = if show_error && show_tag_input {
         Layout::default()
             .direction(ratatui::layout::Direction::Vertical)
-            .constraints([Constraint::Length(3), Constraint::Min(0)])
+            .constraints([Constraint::Length(3), Constraint::Length(4), Constraint::Min(0)])
+            .split(f.size())
+    } else if show_error || show_tag_input {
+        Layout::default()
+            .direction(ratatui::layout::Direction::Vertical)
+            .constraints([Constraint::Length(if show_tag_input { 4 } else { 3 }), Constraint::Min(0)])
             .split(f.size())
     } else {
         Layout::default()
@@ -811,35 +881,75 @@ fn render_session_list(f: &mut Frame, app: &ViewerApp) {
             .split(f.size())
     };
     
-    let main_area = if app.error_message.is_some() {
-        chunks[1]
-    } else {
-        chunks[0]
-    };
+    let mut chunk_idx = 0;
     
     // Show error message if present
-    if let Some(ref error) = app.error_message {
-        let error_paragraph = Paragraph::new(error.as_str())
+    if show_error {
+        let error_paragraph = Paragraph::new(app.error_message.as_ref().unwrap().as_str())
             .block(Block::default().borders(Borders::ALL).title("Error").style(Style::default().fg(Color::Red)))
             .wrap(Wrap { trim: false });
-        f.render_widget(error_paragraph, chunks[0]);
+        f.render_widget(error_paragraph, chunks[chunk_idx]);
+        chunk_idx += 1;
     }
+    
+    // Show tag input if in tag input mode
+    if show_tag_input {
+        let tag_text = format!("Tag: {}", app.tag_input);
+        let help_text = "Enter tag name and press Enter to add, Esc to cancel";
+        
+        let tag_chunks = Layout::default()
+            .direction(ratatui::layout::Direction::Vertical)
+            .constraints([
+                Constraint::Length(3), // Input line
+                Constraint::Length(1), // Help text
+            ])
+            .split(chunks[chunk_idx]);
+        
+        let input_style = Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD);
+        
+        let input_paragraph = Paragraph::new(tag_text.as_str())
+            .block(Block::default().borders(Borders::ALL).title("Add Tag"))
+            .style(input_style);
+        f.render_widget(input_paragraph, tag_chunks[0]);
+        
+        // Show cursor
+        f.set_cursor(
+            tag_chunks[0].x + 6 + app.tag_input.len() as u16,
+            tag_chunks[0].y + 1,
+        );
+        
+        let help_paragraph = Paragraph::new(help_text)
+            .block(Block::default())
+            .style(Style::default().fg(Color::DarkGray))
+            .wrap(Wrap { trim: false });
+        f.render_widget(help_paragraph, tag_chunks[1]);
+        
+        chunk_idx += 1;
+    }
+    
+    let main_area = chunks[chunk_idx];
 
     let items: Vec<ListItem> = app
         .sessions
         .iter()
-        .map(|(session, packet_count)| {
+        .map(|(session, packet_count, tags)| {
             let duration = if let Some(ended_at) = session.ended_at {
                 let duration = ended_at - session.started_at;
                 format!("{} packets | {}s", packet_count, duration.num_seconds())
             } else {
                 format!("{} packets | Active", packet_count)
             };
+            let tags_str = if tags.is_empty() {
+                String::new()
+            } else {
+                format!(" | Tags: {}", tags.join(", "))
+            };
             let text = format!(
-                "Session #{} | Started: {} | {}",
+                "Session #{} | Started: {} | {}{}",
                 session.id,
                 session.started_at.format("%Y-%m-%d %H:%M:%S"),
-                duration
+                duration,
+                tags_str
             );
             ListItem::new(text)
         })
@@ -850,7 +960,7 @@ fn render_session_list(f: &mut Frame, app: &ViewerApp) {
     list_state.select(Some(app.selected_session));
 
     let list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title("Session Logs (?? to navigate, Enter to select, q to quit)"))
+        .block(Block::default().borders(Borders::ALL).title("Session Logs (↑↓ to navigate, Enter to select, t to tag, q to quit)"))
         .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
     
     f.render_stateful_widget(list, main_area, &mut list_state);
