@@ -31,6 +31,7 @@ pub struct DbPacketFilter {
     pub direction: Option<String>, // "clientbound", "serverbound", or None for all
     pub packet_name: Option<String>, // Packet name to filter by, or None for all
     pub packet_name_is_wildcard: bool, // If true, use ILIKE with wildcards; if false, use exact match
+    pub is_exclusion: bool, // If true, this filter excludes matching packets
 }
 
 #[derive(Debug, Clone)]
@@ -126,51 +127,105 @@ impl Database {
                     )
                     .await
             } else {
-                // Build WHERE clause with OR conditions for each filter
-                let mut conditions = Vec::new();
+                // Separate inclusion and exclusion filters
+                let inclusion_filters: Vec<_> = filter_set.filters.iter().filter(|f| !f.is_exclusion).collect();
+                let exclusion_filters: Vec<_> = filter_set.filters.iter().filter(|f| f.is_exclusion).collect();
+                
                 let mut param_index = 1;
                 let mut params: Vec<Box<dyn tokio_postgres::types::ToSql + Sync>> = vec![Box::new(session_id)];
+                let mut where_parts = Vec::new();
                 
-                for filter in &filter_set.filters {
-                    let mut filter_conditions = Vec::new();
+                // Build inclusion conditions (OR logic: match any inclusion filter)
+                if !inclusion_filters.is_empty() {
+                    let mut inclusion_conditions = Vec::new();
                     
-                    // Direction filter
-                    if let Some(ref direction) = filter.direction {
-                        filter_conditions.push(format!("direction = '{}'", direction));
-                    }
-                    
-                    // Packet name filter
-                    if let Some(ref packet_name) = filter.packet_name {
-                        param_index += 1;
-                        if filter.packet_name_is_wildcard {
-                            // Convert * to % for SQL ILIKE pattern matching
-                            // Note: Users can include literal % or _ in their pattern if needed by escaping
-                            let sql_pattern = packet_name.replace('*', "%");
-                            
-                            filter_conditions.push(format!("packet->>'name' ILIKE ${}", param_index));
-                            params.push(Box::new(sql_pattern));
+                    for filter in inclusion_filters {
+                        let mut filter_conditions = Vec::new();
+                        
+                        // Direction filter
+                        if let Some(ref direction) = filter.direction {
+                            filter_conditions.push(format!("direction = '{}'", direction));
+                        }
+                        
+                        // Packet name filter
+                        if let Some(ref packet_name) = filter.packet_name {
+                            param_index += 1;
+                            if filter.packet_name_is_wildcard {
+                                // Convert * to % for SQL ILIKE pattern matching
+                                let sql_pattern = packet_name.replace('*', "%");
+                                filter_conditions.push(format!("packet->>'name' ILIKE ${}", param_index));
+                                params.push(Box::new(sql_pattern));
+                            } else {
+                                // Exact match
+                                filter_conditions.push(format!("packet->>'name' = ${}", param_index));
+                                params.push(Box::new(packet_name.clone()));
+                            }
+                        }
+                        
+                        // Combine conditions for this filter with AND
+                        if !filter_conditions.is_empty() {
+                            inclusion_conditions.push(format!("({})", filter_conditions.join(" AND ")));
                         } else {
-                            // Exact match
-                            filter_conditions.push(format!("packet->>'name' = ${}", param_index));
-                            params.push(Box::new(packet_name.clone()));
+                            // No conditions means match all
+                            inclusion_conditions.push("1=1".to_string());
                         }
                     }
                     
-                    // Combine conditions for this filter with AND
-                    if !filter_conditions.is_empty() {
-                        conditions.push(format!("({})", filter_conditions.join(" AND ")));
-                    } else {
-                        // No conditions means match all - but we still need a condition
-                        // This shouldn't happen in practice, but handle it
-                        conditions.push("1=1".to_string());
+                    if !inclusion_conditions.is_empty() {
+                        where_parts.push(format!("({})", inclusion_conditions.join(" OR ")));
+                    }
+                } else {
+                    // No inclusion filters means match all packets (before exclusions)
+                    where_parts.push("1=1".to_string());
+                }
+                
+                // Build exclusion conditions (AND NOT logic: exclude all exclusion filters)
+                if !exclusion_filters.is_empty() {
+                    let mut exclusion_conditions = Vec::new();
+                    
+                    for filter in exclusion_filters {
+                        let mut filter_conditions = Vec::new();
+                        
+                        // Direction filter
+                        if let Some(ref direction) = filter.direction {
+                            filter_conditions.push(format!("direction = '{}'", direction));
+                        }
+                        
+                        // Packet name filter
+                        if let Some(ref packet_name) = filter.packet_name {
+                            param_index += 1;
+                            if filter.packet_name_is_wildcard {
+                                // Convert * to % for SQL ILIKE pattern matching
+                                let sql_pattern = packet_name.replace('*', "%");
+                                filter_conditions.push(format!("packet->>'name' ILIKE ${}", param_index));
+                                params.push(Box::new(sql_pattern));
+                            } else {
+                                // Exact match
+                                filter_conditions.push(format!("packet->>'name' = ${}", param_index));
+                                params.push(Box::new(packet_name.clone()));
+                            }
+                        }
+                        
+                        // Combine conditions for this exclusion filter with AND
+                        if !filter_conditions.is_empty() {
+                            exclusion_conditions.push(format!("NOT ({})", filter_conditions.join(" AND ")));
+                        } else {
+                            // No conditions means exclude all - this would exclude everything
+                            // Skip this filter as it's invalid
+                            continue;
+                        }
+                    }
+                    
+                    if !exclusion_conditions.is_empty() {
+                        where_parts.push(format!("({})", exclusion_conditions.join(" AND ")));
                     }
                 }
                 
-                // Combine all filters with OR
-                let where_clause = if conditions.is_empty() {
+                // Combine all WHERE parts with AND
+                let where_clause = if where_parts.is_empty() {
                     "session_id = $1".to_string()
                 } else {
-                    format!("session_id = $1 AND ({})", conditions.join(" OR "))
+                    format!("session_id = $1 AND {}", where_parts.join(" AND "))
                 };
                 
                 let query = format!(

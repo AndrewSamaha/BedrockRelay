@@ -39,6 +39,7 @@ impl PacketFilterSet {
                     }),
                     packet_name: f.packet_name.clone(),
                     packet_name_is_wildcard: f.packet_name_is_wildcard,
+                    is_exclusion: f.is_exclusion,
                 }
             }).collect(),
         }
@@ -46,15 +47,16 @@ impl PacketFilterSet {
     
     fn to_string(&self) -> String {
         self.filters.iter().map(|f| {
+            let prefix = if f.is_exclusion { "!" } else { "" };
             let dir_str = match f.direction {
                 Some(FilterPacketDirection::Clientbound) => "c",
                 Some(FilterPacketDirection::Serverbound) => "s",
                 None => "a",
             };
             if let Some(ref name) = f.packet_name {
-                format!("{}.{}", dir_str, name)
+                format!("{}{}.{}", prefix, dir_str, name)
             } else {
-                dir_str.to_string()
+                format!("{}{}", prefix, dir_str)
             }
         }).collect::<Vec<_>>().join(",")
     }
@@ -179,6 +181,7 @@ struct PacketFilter {
     direction: Option<FilterPacketDirection>, // None means "all directions"
     packet_name: Option<String>, // None means "all packet types"
     packet_name_is_wildcard: bool, // If true, packet_name contains wildcards (*)
+    is_exclusion: bool, // If true, this filter excludes matching packets
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -291,7 +294,8 @@ impl ViewerApp {
         let mut filters = Vec::new();
         
         for filter_str in filter_strings {
-            // Parse format: [direction][.packet_name]
+            // Parse format: [!][direction][.packet_name]
+            // !: exclusion prefix (exclude matching packets)
             // direction: c (clientbound), s (serverbound), a (all), or empty (all)
             // packet_name: optional, delimited by period
             // packet_name can contain * for wildcard matching
@@ -301,12 +305,19 @@ impl ViewerApp {
                 continue;
             }
             
-            let (direction_char, packet_name) = if let Some(dot_pos) = filter_str.find('.') {
-                let dir = &filter_str[..dot_pos];
-                let name = &filter_str[dot_pos + 1..];
+            // Check for exclusion prefix
+            let (is_exclusion, filter_str_without_prefix) = if filter_str.starts_with('!') {
+                (true, &filter_str[1..])
+            } else {
+                (false, filter_str)
+            };
+            
+            let (direction_char, packet_name) = if let Some(dot_pos) = filter_str_without_prefix.find('.') {
+                let dir = &filter_str_without_prefix[..dot_pos];
+                let name = &filter_str_without_prefix[dot_pos + 1..];
                 (dir, Some(name.to_string()))
             } else {
-                (filter_str, None)
+                (filter_str_without_prefix, None)
             };
             
             let direction = match direction_char.to_lowercase().as_str() {
@@ -328,6 +339,7 @@ impl ViewerApp {
                 direction,
                 packet_name,
                 packet_name_is_wildcard,
+                is_exclusion,
             });
         }
         
@@ -1623,7 +1635,7 @@ fn hex_dump(data: &[u8], bytes_per_line: usize) -> String {
 
 fn render_filter_panel(f: &mut Frame, area: Rect, app: &ViewerApp) {
     let filter_text = format!("Filter: {}", app.filter_input);
-    let help_text = "Format: [c|s|a][.packet_name][,filter2,...] | Examples: s.player_auth_input, c.start_game, s.*action* | Enter to apply, Esc to cancel";
+    let help_text = "Format: [!][c|s|a][.packet_name][,filter2,...] | Examples: s.player_auth_input, c.start_game, !s.player_auth_movement, s.*action* | Enter to apply, Esc to cancel";
     
     let chunks = Layout::default()
         .direction(ratatui::layout::Direction::Vertical)
