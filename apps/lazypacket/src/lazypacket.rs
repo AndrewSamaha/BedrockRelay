@@ -4,7 +4,7 @@ mod db;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use packet_logger::{PacketDirection, PacketEntry};
@@ -18,7 +18,7 @@ use ratatui::{
 };
 use serde_json;
 use std::io;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use db::{Database, Session as DbSession, DbPacketFilterSet, DbPacketFilter};
 
 struct SessionLog {
@@ -154,6 +154,9 @@ struct ViewerApp {
     tag_input: String, // Current tag input text
     tag_management: Option<TagManagementState>, // Tag management modal state
     confirmation_dialog: Option<ConfirmationDialogState>, // Confirmation dialog state
+    json_expanded_paths: HashSet<String>, // Set of JSON paths that are expanded (e.g., "root.field.subfield")
+    packet_details_area: Option<Rect>, // Cached area for packet details panel (for mouse click detection)
+    json_line_to_path: Vec<Option<String>>, // Mapping from line index to JSON path (for mouse click handling)
 }
 
 struct TagManagementState {
@@ -234,6 +237,13 @@ impl ViewerApp {
             tag_input: String::new(),
             tag_management: None,
             confirmation_dialog: None,
+            json_expanded_paths: {
+                let mut set = HashSet::new();
+                set.insert("root".to_string()); // Expand root by default
+                set
+            },
+            packet_details_area: None,
+            json_line_to_path: Vec::new(),
         })
     }
 
@@ -398,6 +408,18 @@ impl ViewerApp {
                 self.diff_panel_scroll = 0;
             }
         }
+    }
+
+    fn toggle_json_path(&mut self, path: &str) {
+        if self.json_expanded_paths.contains(path) {
+            self.json_expanded_paths.remove(path);
+        } else {
+            self.json_expanded_paths.insert(path.to_string());
+        }
+    }
+
+    fn is_json_path_expanded(&self, path: &str) -> bool {
+        self.json_expanded_paths.contains(path)
     }
 }
 
@@ -599,6 +621,212 @@ fn format_json_diff(diff: &JsonDiff, path: &str, indent: usize) -> Vec<(String, 
     result
 }
 
+// Structure to track JSON rendering with expand/collapse
+struct JsonLine {
+    line: String,
+    path: Option<String>, // JSON path for this line (e.g., "root.field.subfield")
+    is_expandable: bool,  // Whether this line has expand/collapse indicator
+    indent_level: usize,  // Indentation level
+}
+
+fn render_json_with_expand_collapse(
+    json: &serde_json::Value,
+    expanded_paths: &HashSet<String>,
+    current_path: &str,
+    indent: usize,
+) -> Vec<JsonLine> {
+    let mut result = Vec::new();
+    let indent_str = "  ".repeat(indent);
+    
+    match json {
+        serde_json::Value::Object(obj) => {
+            if obj.is_empty() {
+                result.push(JsonLine {
+                    line: format!("{}{{}}", indent_str),
+                    path: Some(current_path.to_string()),
+                    is_expandable: false,
+                    indent_level: indent,
+                });
+            } else {
+                let path_key = current_path; // Use current_path as-is (should be "root" for top-level)
+                let is_expanded = expanded_paths.contains(path_key);
+                
+                result.push(JsonLine {
+                    line: format!("{}{{", indent_str),
+                    path: Some(path_key.to_string()),
+                    is_expandable: true,
+                    indent_level: indent,
+                });
+                
+                if is_expanded {
+                    let mut keys: Vec<_> = obj.keys().collect();
+                    keys.sort();
+                    
+                    for (i, key) in keys.iter().enumerate() {
+                        let value = &obj[*key];
+                        let new_path = if current_path == "root" {
+                            (*key).clone()
+                        } else {
+                            format!("{}.{}", current_path, key)
+                        };
+                        
+                        let is_last = i == keys.len() - 1;
+                        let comma = if is_last { "" } else { "," };
+                        
+                        match value {
+                            serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
+                                let value_lines = render_json_with_expand_collapse(value, expanded_paths, &new_path, indent + 1);
+                                if let Some(first_line) = value_lines.first() {
+                                    result.push(JsonLine {
+                                        line: format!("{}  \"{}\": {}", indent_str, key, first_line.line.trim_start()),
+                                        path: Some(new_path.clone()),
+                                        is_expandable: first_line.is_expandable,
+                                        indent_level: indent + 1,
+                                    });
+                                    // Add remaining lines
+                                    for line in value_lines.iter().skip(1) {
+                                        result.push(JsonLine {
+                                            line: line.line.clone(),
+                                            path: line.path.clone(),
+                                            is_expandable: line.is_expandable,
+                                            indent_level: line.indent_level,
+                                        });
+                                    }
+                                }
+                            }
+                            _ => {
+                                let value_str = serde_json::to_string(value).unwrap_or_else(|_| "null".to_string());
+                                result.push(JsonLine {
+                                    line: format!("{}  \"{}\": {}{}", indent_str, key, value_str, comma),
+                                    path: None,
+                                    is_expandable: false,
+                                    indent_level: indent + 1,
+                                });
+                            }
+                        }
+                    }
+                    
+                    result.push(JsonLine {
+                        line: format!("{}}}", indent_str),
+                        path: None,
+                        is_expandable: false,
+                        indent_level: indent,
+                    });
+                } else {
+                    result.push(JsonLine {
+                        line: format!("{}  ... {} keys", indent_str, obj.len()),
+                        path: None,
+                        is_expandable: false,
+                        indent_level: indent + 1,
+                    });
+                    result.push(JsonLine {
+                        line: format!("{}}}", indent_str),
+                        path: None,
+                        is_expandable: false,
+                        indent_level: indent,
+                    });
+                }
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            if arr.is_empty() {
+                result.push(JsonLine {
+                    line: format!("{}[]", indent_str),
+                    path: Some(current_path.to_string()),
+                    is_expandable: false,
+                    indent_level: indent,
+                });
+            } else {
+                let path_key = current_path; // Use current_path as-is
+                let is_expanded = expanded_paths.contains(path_key);
+                
+                result.push(JsonLine {
+                    line: format!("{}[", indent_str),
+                    path: Some(path_key.to_string()),
+                    is_expandable: true,
+                    indent_level: indent,
+                });
+                
+                if is_expanded {
+                    for (i, value) in arr.iter().enumerate() {
+                        let new_path = format!("{}[{}]", current_path, i);
+                        let is_last = i == arr.len() - 1;
+                        let comma = if is_last { "" } else { "," };
+                        
+                        match value {
+                            serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
+                                let value_lines = render_json_with_expand_collapse(value, expanded_paths, &new_path, indent + 1);
+                                if let Some(first_line) = value_lines.first() {
+                                    result.push(JsonLine {
+                                        line: format!("{}  {}", indent_str, first_line.line.trim_start()),
+                                        path: Some(new_path.clone()),
+                                        is_expandable: first_line.is_expandable,
+                                        indent_level: indent + 1,
+                                    });
+                                    // Add remaining lines
+                                    for line in value_lines.iter().skip(1) {
+                                        result.push(JsonLine {
+                                            line: line.line.clone(),
+                                            path: line.path.clone(),
+                                            is_expandable: line.is_expandable,
+                                            indent_level: line.indent_level,
+                                        });
+                                    }
+                                }
+                                if !is_last {
+                                    if let Some(last_line) = result.last_mut() {
+                                        last_line.line.push_str(comma);
+                                    }
+                                }
+                            }
+                            _ => {
+                                let value_str = serde_json::to_string(value).unwrap_or_else(|_| "null".to_string());
+                                result.push(JsonLine {
+                                    line: format!("{}  {}{}", indent_str, value_str, comma),
+                                    path: None,
+                                    is_expandable: false,
+                                    indent_level: indent + 1,
+                                });
+                            }
+                        }
+                    }
+                    
+                    result.push(JsonLine {
+                        line: format!("{}]", indent_str),
+                        path: None,
+                        is_expandable: false,
+                        indent_level: indent,
+                    });
+                } else {
+                    result.push(JsonLine {
+                        line: format!("{}  ... {} items", indent_str, arr.len()),
+                        path: None,
+                        is_expandable: false,
+                        indent_level: indent + 1,
+                    });
+                    result.push(JsonLine {
+                        line: format!("{}]", indent_str),
+                        path: None,
+                        is_expandable: false,
+                        indent_level: indent,
+                    });
+                }
+            }
+        }
+        _ => {
+            let value_str = serde_json::to_string(json).unwrap_or_else(|_| "null".to_string());
+            result.push(JsonLine {
+                line: format!("{}{}", indent_str, value_str),
+                path: None,
+                is_expandable: false,
+                indent_level: indent,
+            });
+        }
+    }
+    
+    result
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Load .env file - find project root first
@@ -612,6 +840,7 @@ async fn main() -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, crossterm::event::EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?; // Clear the screen before drawing
@@ -623,8 +852,9 @@ async fn main() -> Result<()> {
         terminal.draw(|f| ui(f, &mut app))?;
 
         if event::poll(std::time::Duration::from_millis(50))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
+            match event::read()? {
+                Event::Key(key) => {
+                    if key.kind == KeyEventKind::Press {
                     match app.mode {
                         ViewerMode::SessionList => {
                             match key.code {
@@ -1031,13 +1261,58 @@ async fn main() -> Result<()> {
                             }
                         }
                     }
+                    }
                 }
+                Event::Mouse(mouse) => {
+                    // Handle mouse events
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => {
+                            // Scroll up in packet details
+                            if matches!(app.mode, ViewerMode::PacketView) && app.packet_details_scroll > 0 {
+                                app.packet_details_scroll -= 1;
+                            }
+                        }
+                        MouseEventKind::ScrollDown => {
+                            // Scroll down in packet details
+                            if matches!(app.mode, ViewerMode::PacketView) {
+                                app.packet_details_scroll += 1;
+                            }
+                        }
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            // Handle left click for expand/collapse
+                            if matches!(app.mode, ViewerMode::PacketView) && !app.show_hex {
+                                if let Some(area) = app.packet_details_area {
+                                    // Check if click is within packet details area
+                                    if mouse.column >= area.x && mouse.column < area.x + area.width &&
+                                       mouse.row >= area.y && mouse.row < area.y + area.height {
+                                        // Calculate which line was clicked (accounting for scroll and border)
+                                        let click_y = mouse.row - area.y;
+                                        if click_y >= 1 && click_y < area.height - 1 {
+                                            let line_index = (click_y - 1) as usize + app.packet_details_scroll as usize;
+                                            // Check if click is on expand/collapse indicator (first 2 columns)
+                                            let click_x = mouse.column - area.x;
+                                            if click_x < 2 {
+                                                // Click is on the indicator area - get path before mutable borrow
+                                                let path_opt = app.json_line_to_path.get(line_index).and_then(|p| p.as_ref()).map(|p| p.clone());
+                                                if let Some(path) = path_opt {
+                                                    app.toggle_json_path(&path);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
             }
         }
     }
 
     disable_raw_mode()?;
-    execute!(io::stdout(), LeaveAlternateScreen)?;
+    execute!(io::stdout(), LeaveAlternateScreen, crossterm::event::DisableMouseCapture)?;
     Ok(())
 }
 
@@ -1147,12 +1422,19 @@ fn render_packet_view(f: &mut Frame, app: &mut ViewerApp) {
         .split(f.size());
 
     // Header
-    let packet = app.current_packet();
     let packet_num = app.packet_index + 1;
     let total_packets = log.packets.len();
     
-    let session_time = if let Some(p) = packet {
-        let relative = log.relative_time(p.timestamp);
+    // Get packet data before borrowing app
+    let packet_data = app.current_packet().map(|p| (
+        p.timestamp,
+        p.packet_number,
+        p.packet_json.clone(),
+        p.direction,
+    ));
+    
+    let session_time = if let Some((timestamp, _, _, _)) = packet_data {
+        let relative = log.relative_time(timestamp);
         format!("{:.3}s", relative as f64 / 1000.0)
     } else {
         "0.000s".to_string()
@@ -1172,7 +1454,7 @@ fn render_packet_view(f: &mut Frame, app: &mut ViewerApp) {
         .map(|v| format!("Protocol: {}", v))
         .unwrap_or_else(|| "Protocol: Unknown".to_string());
     let header_text = format!(
-        "Session: #{} | {} | Packet: {}/{} | Time: {} | View: {}{}{} | [Left/Right/h/l: navigate, Up/Down/k/j: scroll details, PgUp/PgDn: jump 10, Home/End: first/last, x: view, f: filter, c: compare, Esc: exit compare, q: back]",
+        "Session: #{} | {} | Packet: {}/{} | Time: {} | View: {}{}{} | [Left/Right/h/l: navigate, Up/Down/k/j/mouse wheel: scroll, Click +/-: expand/collapse JSON, PgUp/PgDn: jump 10, Home/End: first/last, x: view, f: filter, c: compare, Esc: exit compare, q: back]",
         log.session_id,
         version_str,
         packet_num,
@@ -1205,9 +1487,14 @@ fn render_packet_view(f: &mut Frame, app: &mut ViewerApp) {
         vec![chunks[3]]
     };
 
-    // Extract packet data and scroll values before modifying app
-    let packet_json_for_diff = packet.and_then(|p| p.packet_json.clone());
-    let packet_name_for_title = packet.and_then(|p| p.packet_json.as_ref())
+    // Store packet details area for mouse click detection (before using packet_data)
+    let details_area = detail_chunks[0];
+    app.packet_details_area = Some(details_area);
+
+    // Extract packet data for rendering
+    let packet_json_for_diff = packet_data.as_ref().and_then(|(_, _, json, _)| json.clone());
+    let packet_name_for_title = packet_data.as_ref()
+        .and_then(|(_, _, json, _)| json.as_ref())
         .and_then(|json| json.get("name"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
@@ -1216,9 +1503,9 @@ fn render_packet_view(f: &mut Frame, app: &mut ViewerApp) {
     let baseline_json_for_diff = app.baseline_packet_json.clone();
     let diff_panel_scroll_value = app.diff_panel_scroll;
     
-    // Extract metadata for delta calculation
-    let current_packet_timestamp = packet.map(|p| p.timestamp);
-    let current_packet_number = packet.and_then(|p| p.packet_number);
+    // Extract metadata for delta calculation (use as_ref to avoid move)
+    let current_packet_timestamp = packet_data.as_ref().map(|(ts, _, _, _)| *ts);
+    let current_packet_number = packet_data.as_ref().and_then(|(_, num, _, _)| *num);
     let baseline_packet_timestamp = app.baseline_packet_index
         .and_then(|idx| log.packets.get(idx))
         .map(|p| p.timestamp);
@@ -1227,72 +1514,66 @@ fn render_packet_view(f: &mut Frame, app: &mut ViewerApp) {
         .and_then(|p| p.packet_number);
 
     // Packet details (left panel, or full width if not in compare mode)
-    if let Some(packet) = packet {
-        let direction_str = match packet.direction {
+    if let Some((timestamp, packet_number_opt, packet_json, direction)) = packet_data {
+        let direction_str = match direction {
             PacketDirection::Clientbound => "? Clientbound",
             PacketDirection::Serverbound => "? Serverbound",
         };
         
-        let direction_color = match packet.direction {
+        let direction_color = match direction {
             PacketDirection::Clientbound => Color::Green,
             PacketDirection::Serverbound => Color::Blue,
         };
 
-        let timestamp_dt = DateTime::<Utc>::from_timestamp_millis(packet.timestamp)
+        let timestamp_dt = DateTime::<Utc>::from_timestamp_millis(timestamp)
             .unwrap_or_default();
         let time_str = timestamp_dt.format("%Y-%m-%d %H:%M:%S%.3f UTC").to_string();
 
-        let packet_number_str = packet.packet_number
+        let packet_number_str = packet_number_opt
             .map(|n| format!("Packet Number: {}\n", n))
             .unwrap_or_else(|| String::new());
         
-        let details = if app.show_hex {
+        // Get packet data for hex view
+        let packet_data_for_hex = app.current_packet().map(|p| p.data.clone());
+        
+        let (lines_vec, total_lines) = if app.show_hex {
             // Hex view
-            format!(
+            let data_len = packet_data_for_hex.as_ref().map(|d| d.len()).unwrap_or(0);
+            let hex_content = format!(
                 "Direction: {}\nTimestamp: {}\n{}Size: {} bytes\n\nHex Dump:\n{}",
                 direction_str,
                 time_str,
                 packet_number_str,
-                packet.data.len(),
-                hex_dump(&packet.data, 16)
-            )
+                data_len,
+                packet_data_for_hex.as_ref().map(|d| hex_dump(d, 16)).unwrap_or_else(|| String::new())
+            );
+            let lines: Vec<Line> = hex_content.lines().map(|l| Line::from(l.to_string())).collect();
+            app.json_line_to_path.clear(); // Clear path mapping for hex view
+            (lines, hex_content.lines().count())
         } else {
-            // JSON view (default) - display packet JSON from database
-            if let Some(ref packet_json) = packet.packet_json {
-                // If we have JSON packet from database, display it directly
-                // The packet JSON already contains the packet structure
-                match serde_json::to_string_pretty(packet_json) {
-                    Ok(json_str) => {
-                        // Add metadata header
-                        format!(
-                            "Direction: {}\nTimestamp: {}\n{}Relative Time: {:.3}s\n\nPacket JSON:\n{}",
-                            direction_str,
-                            time_str,
-                            packet_number_str,
-                            log.relative_time(packet.timestamp) as f64 / 1000.0,
-                            json_str
-                        )
-                    },
-                    Err(e) => format!("Error formatting JSON: {}", e)
-                }
+            // JSON view (default) - display packet JSON from database with expand/collapse
+            let json_value = if let Some(ref packet_json) = packet_json {
+                packet_json.clone()
             } else {
                 // Fallback: if no JSON packet available (e.g., from binary logs), show metadata and try to decode
+                let packet_data_for_json = app.current_packet().map(|p| (p.data.clone(), p.direction));
+                let data_len = packet_data_for_json.as_ref().map(|(d, _)| d.len()).unwrap_or(0);
                 let mut json_value = serde_json::json!({
                     "direction": direction_str,
-                    "timestamp": packet.timestamp,
+                    "timestamp": timestamp,
                     "timestamp_formatted": time_str,
-                    "relative_time_ms": log.relative_time(packet.timestamp),
-                    "size_bytes": packet.data.len(),
+                    "relative_time_ms": log.relative_time(timestamp),
+                    "size_bytes": data_len,
                 });
                 
                 // Add packet_number if available
-                if let Some(packet_num) = packet.packet_number {
+                if let Some(packet_num) = packet_number_opt {
                     json_value["packet_number"] = serde_json::json!(packet_num);
                 }
                 
                 // Try to decode packet using protocol parser
-                if let Some(ref parser) = app.protocol_parser {
-                    let decoded = parser.decode_packet(&packet.data, packet.direction);
+                if let (Some(ref parser), Some((ref data, dir))) = (app.protocol_parser.as_ref(), packet_data_for_json.as_ref()) {
+                    let decoded = parser.decode_packet(data, *dir);
                     
                     if let Some(packet_name) = decoded.packet_name {
                         json_value["packet_name"] = serde_json::json!(packet_name);
@@ -1309,19 +1590,51 @@ fn render_packet_view(f: &mut Frame, app: &mut ViewerApp) {
                 }
                 
                 // Include raw data as array for binary format
-                json_value["data"] = serde_json::json!(packet.data);
-                
-                match serde_json::to_string_pretty(&json_value) {
-                    Ok(json_str) => json_str,
-                    Err(e) => format!("Error formatting JSON: {}", e)
+                if let Some((ref data, _)) = packet_data_for_json {
+                    json_value["data"] = serde_json::json!(data);
                 }
-            }
-        };
+                json_value
+            };
 
-        // Regular mode - plain text lines for packet details
-        let lines: Vec<&str> = details.lines().collect();
-        let lines_vec: Vec<Line> = lines.iter().map(|l| Line::from(*l)).collect();
-        let total_lines = lines_vec.len();
+            // Build metadata header lines
+            let mut all_lines = Vec::new();
+            all_lines.push(Line::from(format!("Direction: {}", direction_str)));
+            all_lines.push(Line::from(format!("Timestamp: {}", time_str)));
+            if !packet_number_str.is_empty() {
+                all_lines.push(Line::from(packet_number_str.trim()));
+            }
+            all_lines.push(Line::from(format!("Relative Time: {:.3}s", log.relative_time(timestamp) as f64 / 1000.0)));
+            all_lines.push(Line::from(""));
+            all_lines.push(Line::from("Packet JSON:"));
+
+            // Add empty path mappings for header lines
+            let mut line_to_path = vec![None; all_lines.len()];
+
+            // Render JSON with expand/collapse (start with "root" path)
+            let expanded_paths = app.json_expanded_paths.clone();
+            let json_lines = render_json_with_expand_collapse(&json_value, &expanded_paths, "root", 0);
+            
+            for json_line in json_lines {
+                let indicator = if json_line.is_expandable {
+                    let is_expanded = json_line.path.as_ref()
+                        .map(|p| expanded_paths.contains(p))
+                        .unwrap_or(false);
+                    if is_expanded { "- " } else { "+ " }
+                } else {
+                    "  "
+                };
+                
+                let line_text = format!("{}{}", indicator, json_line.line);
+                all_lines.push(Line::from(line_text));
+                line_to_path.push(json_line.path);
+            }
+
+            // Update json_line_to_path mapping
+            app.json_line_to_path = line_to_path;
+
+            let total_lines = all_lines.len();
+            (all_lines, total_lines)
+        };
         
         let max_lines = detail_chunks[0].height.saturating_sub(2) as usize; // Account for border
         
@@ -1350,11 +1663,11 @@ fn render_packet_view(f: &mut Frame, app: &mut ViewerApp) {
         };
         
         // Build title with metadata
-        let relative_time_sec = log.relative_time(packet.timestamp) as f64 / 1000.0;
-        let packet_num_str = packet.packet_number
+        let relative_time_sec = log.relative_time(timestamp) as f64 / 1000.0;
+        let packet_num_str = packet_number_opt
             .map(|n| format!("#{} ", n))
             .unwrap_or_else(|| String::new());
-        let direction_str = match packet.direction {
+        let direction_str = match direction {
             PacketDirection::Clientbound => "clientbound",
             PacketDirection::Serverbound => "serverbound",
         };
