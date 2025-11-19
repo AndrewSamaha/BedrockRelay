@@ -39,6 +39,7 @@ impl PacketFilterSet {
                     }),
                     packet_name: f.packet_name.clone(),
                     packet_name_is_wildcard: f.packet_name_is_wildcard,
+                    is_exclusion: f.is_exclusion,
                 }
             }).collect(),
         }
@@ -46,15 +47,16 @@ impl PacketFilterSet {
     
     fn to_string(&self) -> String {
         self.filters.iter().map(|f| {
+            let prefix = if f.is_exclusion { "!" } else { "" };
             let dir_str = match f.direction {
                 Some(FilterPacketDirection::Clientbound) => "c",
                 Some(FilterPacketDirection::Serverbound) => "s",
                 None => "a",
             };
             if let Some(ref name) = f.packet_name {
-                format!("{}.{}", dir_str, name)
+                format!("{}{}.{}", prefix, dir_str, name)
             } else {
-                dir_str.to_string()
+                format!("{}{}", prefix, dir_str)
             }
         }).collect::<Vec<_>>().join(",")
     }
@@ -179,6 +181,7 @@ struct PacketFilter {
     direction: Option<FilterPacketDirection>, // None means "all directions"
     packet_name: Option<String>, // None means "all packet types"
     packet_name_is_wildcard: bool, // If true, packet_name contains wildcards (*)
+    is_exclusion: bool, // If true, this filter excludes matching packets
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -291,7 +294,8 @@ impl ViewerApp {
         let mut filters = Vec::new();
         
         for filter_str in filter_strings {
-            // Parse format: [direction][.packet_name]
+            // Parse format: [!][direction][.packet_name]
+            // !: exclusion prefix (exclude matching packets)
             // direction: c (clientbound), s (serverbound), a (all), or empty (all)
             // packet_name: optional, delimited by period
             // packet_name can contain * for wildcard matching
@@ -301,12 +305,19 @@ impl ViewerApp {
                 continue;
             }
             
-            let (direction_char, packet_name) = if let Some(dot_pos) = filter_str.find('.') {
-                let dir = &filter_str[..dot_pos];
-                let name = &filter_str[dot_pos + 1..];
+            // Check for exclusion prefix
+            let (is_exclusion, filter_str_without_prefix) = if filter_str.starts_with('!') {
+                (true, &filter_str[1..])
+            } else {
+                (false, filter_str)
+            };
+            
+            let (direction_char, packet_name) = if let Some(dot_pos) = filter_str_without_prefix.find('.') {
+                let dir = &filter_str_without_prefix[..dot_pos];
+                let name = &filter_str_without_prefix[dot_pos + 1..];
                 (dir, Some(name.to_string()))
             } else {
-                (filter_str, None)
+                (filter_str_without_prefix, None)
             };
             
             let direction = match direction_char.to_lowercase().as_str() {
@@ -328,6 +339,7 @@ impl ViewerApp {
                 direction,
                 packet_name,
                 packet_name_is_wildcard,
+                is_exclusion,
             });
         }
         
@@ -1113,6 +1125,12 @@ fn render_session_list(f: &mut Frame, app: &mut ViewerApp) {
 }
 
 fn render_packet_view(f: &mut Frame, app: &mut ViewerApp) {
+    // Extract scroll value before borrowing log
+    let current_scroll = app.packet_details_scroll;
+    
+    // Store clamped scroll value to update app after rendering
+    let mut new_scroll_value = current_scroll;
+    
     let log = match &app.current_log {
         Some(log) => log,
         None => return,
@@ -1189,6 +1207,11 @@ fn render_packet_view(f: &mut Frame, app: &mut ViewerApp) {
 
     // Extract packet data and scroll values before modifying app
     let packet_json_for_diff = packet.and_then(|p| p.packet_json.clone());
+    let packet_name_for_title = packet.and_then(|p| p.packet_json.as_ref())
+        .and_then(|json| json.get("name"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
     let is_baseline_for_diff = app.baseline_packet_index == Some(app.packet_index);
     let baseline_json_for_diff = app.baseline_packet_json.clone();
     let diff_panel_scroll_value = app.diff_panel_scroll;
@@ -1309,11 +1332,13 @@ fn render_packet_view(f: &mut Frame, app: &mut ViewerApp) {
             0
         };
         
-        // Clamp scroll to valid range and update stored value
-        if app.packet_details_scroll > max_scroll {
-            app.packet_details_scroll = max_scroll;
-        }
-        let scroll = app.packet_details_scroll;
+        // Clamp scroll to valid range
+        let scroll = if current_scroll > max_scroll {
+            max_scroll
+        } else {
+            current_scroll
+        };
+        new_scroll_value = scroll;
         
         // Extract visible lines
         let start_line = scroll as usize;
@@ -1324,20 +1349,38 @@ fn render_packet_view(f: &mut Frame, app: &mut ViewerApp) {
             Vec::new()
         };
         
+        // Build title with metadata
+        let relative_time_sec = log.relative_time(packet.timestamp) as f64 / 1000.0;
+        let packet_num_str = packet.packet_number
+            .map(|n| format!("#{} ", n))
+            .unwrap_or_else(|| String::new());
+        let direction_str = match packet.direction {
+            PacketDirection::Clientbound => "clientbound",
+            PacketDirection::Serverbound => "serverbound",
+        };
+        let view_type = if app.show_hex { "Hex" } else if app.compare_mode { "Compare" } else { "JSON" };
+        let scroll_info = if max_scroll > 0 {
+            format!(" [{}/{} lines]", scroll + 1, total_lines)
+        } else {
+            String::new()
+        };
+        
+        let title_text = format!(
+            "Packet Details ({}) | {}{} | {:.3}s | {} | {}",
+            view_type,
+            packet_num_str,
+            direction_str,
+            relative_time_sec,
+            packet_name_for_title,
+            scroll_info
+        );
+        
         let details_paragraph = Paragraph::new(visible_lines)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
                     .title(Span::styled(
-                        format!(
-                            "Packet Details ({}) {}",
-                            if app.show_hex { "Hex" } else if app.compare_mode { "Compare" } else { "JSON" },
-                            if max_scroll > 0 {
-                                format!("[{}/{} lines]", scroll + 1, total_lines)
-                            } else {
-                                String::new()
-                            }
-                        ),
+                        title_text,
                         Style::default().fg(direction_color),
                     )),
             )
@@ -1376,6 +1419,11 @@ fn render_packet_view(f: &mut Frame, app: &mut ViewerApp) {
     
     // Show loading indicator overlay if loading
     render_loading_indicator(f, app);
+    
+    // Update scroll value after all rendering is complete (borrow on log is dropped)
+    if new_scroll_value != current_scroll {
+        app.packet_details_scroll = new_scroll_value;
+    }
 }
 
 fn render_diff_panel(
@@ -1623,7 +1671,7 @@ fn hex_dump(data: &[u8], bytes_per_line: usize) -> String {
 
 fn render_filter_panel(f: &mut Frame, area: Rect, app: &ViewerApp) {
     let filter_text = format!("Filter: {}", app.filter_input);
-    let help_text = "Format: [c|s|a][.packet_name][,filter2,...] | Examples: s.player_auth_input, c.start_game, s.*action* | Enter to apply, Esc to cancel";
+    let help_text = "Format: [!][c|s|a][.packet_name][,filter2,...] | Examples: s.player_auth_input, c.start_game, !s.player_auth_movement, s.*action* | Enter to apply, Esc to cancel";
     
     let chunks = Layout::default()
         .direction(ratatui::layout::Direction::Vertical)
