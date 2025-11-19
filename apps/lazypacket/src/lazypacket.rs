@@ -1125,6 +1125,12 @@ fn render_session_list(f: &mut Frame, app: &mut ViewerApp) {
 }
 
 fn render_packet_view(f: &mut Frame, app: &mut ViewerApp) {
+    // Extract scroll value before borrowing log
+    let current_scroll = app.packet_details_scroll;
+    
+    // Store clamped scroll value to update app after rendering
+    let mut new_scroll_value = current_scroll;
+    
     let log = match &app.current_log {
         Some(log) => log,
         None => return,
@@ -1201,6 +1207,11 @@ fn render_packet_view(f: &mut Frame, app: &mut ViewerApp) {
 
     // Extract packet data and scroll values before modifying app
     let packet_json_for_diff = packet.and_then(|p| p.packet_json.clone());
+    let packet_name_for_title = packet.and_then(|p| p.packet_json.as_ref())
+        .and_then(|json| json.get("name"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
     let is_baseline_for_diff = app.baseline_packet_index == Some(app.packet_index);
     let baseline_json_for_diff = app.baseline_packet_json.clone();
     let diff_panel_scroll_value = app.diff_panel_scroll;
@@ -1321,11 +1332,13 @@ fn render_packet_view(f: &mut Frame, app: &mut ViewerApp) {
             0
         };
         
-        // Clamp scroll to valid range and update stored value
-        if app.packet_details_scroll > max_scroll {
-            app.packet_details_scroll = max_scroll;
-        }
-        let scroll = app.packet_details_scroll;
+        // Clamp scroll to valid range
+        let scroll = if current_scroll > max_scroll {
+            max_scroll
+        } else {
+            current_scroll
+        };
+        new_scroll_value = scroll;
         
         // Extract visible lines
         let start_line = scroll as usize;
@@ -1336,20 +1349,38 @@ fn render_packet_view(f: &mut Frame, app: &mut ViewerApp) {
             Vec::new()
         };
         
+        // Build title with metadata
+        let relative_time_sec = log.relative_time(packet.timestamp) as f64 / 1000.0;
+        let packet_num_str = packet.packet_number
+            .map(|n| format!("#{} ", n))
+            .unwrap_or_else(|| String::new());
+        let direction_str = match packet.direction {
+            PacketDirection::Clientbound => "clientbound",
+            PacketDirection::Serverbound => "serverbound",
+        };
+        let view_type = if app.show_hex { "Hex" } else if app.compare_mode { "Compare" } else { "JSON" };
+        let scroll_info = if max_scroll > 0 {
+            format!(" [{}/{} lines]", scroll + 1, total_lines)
+        } else {
+            String::new()
+        };
+        
+        let title_text = format!(
+            "Packet Details ({}) | {}{} | {:.3}s | {} | {}",
+            view_type,
+            packet_num_str,
+            direction_str,
+            relative_time_sec,
+            packet_name_for_title,
+            scroll_info
+        );
+        
         let details_paragraph = Paragraph::new(visible_lines)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
                     .title(Span::styled(
-                        format!(
-                            "Packet Details ({}) {}",
-                            if app.show_hex { "Hex" } else if app.compare_mode { "Compare" } else { "JSON" },
-                            if max_scroll > 0 {
-                                format!("[{}/{} lines]", scroll + 1, total_lines)
-                            } else {
-                                String::new()
-                            }
-                        ),
+                        title_text,
                         Style::default().fg(direction_color),
                     )),
             )
@@ -1388,6 +1419,11 @@ fn render_packet_view(f: &mut Frame, app: &mut ViewerApp) {
     
     // Show loading indicator overlay if loading
     render_loading_indicator(f, app);
+    
+    // Update scroll value after all rendering is complete (borrow on log is dropped)
+    if new_scroll_value != current_scroll {
+        app.packet_details_scroll = new_scroll_value;
+    }
 }
 
 fn render_diff_panel(
