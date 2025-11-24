@@ -157,6 +157,7 @@ struct ViewerApp {
     json_expanded_paths: HashSet<String>, // Set of JSON paths that are expanded (e.g., "root.field.subfield")
     packet_details_area: Option<Rect>, // Cached area for packet details panel (for mouse click detection)
     json_line_to_path: Vec<Option<String>>, // Mapping from line index to JSON path (for mouse click handling)
+    copy_message_frame: Option<u8>, // Frame counter for copy confirmation message (None = hidden, Some(n) = show for n frames)
 }
 
 struct TagManagementState {
@@ -244,6 +245,7 @@ impl ViewerApp {
             },
             packet_details_area: None,
             json_line_to_path: Vec::new(),
+            copy_message_frame: None,
         })
     }
 
@@ -1001,6 +1003,35 @@ async fn main() -> Result<()> {
                                     app.packet_details_scroll = 0;
                                     app.diff_panel_scroll = 0;
                                 }
+                                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                                    // Copy packet JSON to clipboard
+                                    if let Some(packet) = app.current_packet() {
+                                        if let Some(ref packet_json) = packet.packet_json {
+                                            // Format JSON with pretty printing
+                                            match serde_json::to_string_pretty(packet_json) {
+                                                Ok(json_str) => {
+                                                    // Copy to clipboard
+                                                    if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                                        if clipboard.set_text(json_str).is_ok() {
+                                                            // Show confirmation message (20 frames ≈ 1 second at 50ms poll interval)
+                                                            app.copy_message_frame = Some(20);
+                                                        }
+                                                    }
+                                                }
+                                                Err(_) => {
+                                                    // Fallback: try without pretty printing
+                                                    if let Ok(json_str) = serde_json::to_string(packet_json) {
+                                                        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                                                            if clipboard.set_text(json_str).is_ok() {
+                                                                app.copy_message_frame = Some(20);
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                                 KeyCode::Char('f') | KeyCode::Char('F') => {
                                     // Enter filter input mode
                                     // Initialize filter input with current filter if one exists
@@ -1322,6 +1353,15 @@ fn ui(f: &mut Frame, app: &mut ViewerApp) {
         app.loading_frame = app.loading_frame.wrapping_add(1);
     }
     
+    // Update copy message frame counter
+    if let Some(ref mut frame) = app.copy_message_frame {
+        if *frame > 0 {
+            *frame -= 1;
+        } else {
+            app.copy_message_frame = None;
+        }
+    }
+    
     match app.mode {
         ViewerMode::SessionList => render_session_list(f, app),
         ViewerMode::PacketView | ViewerMode::FilterInput => render_packet_view(f, app),
@@ -1454,7 +1494,7 @@ fn render_packet_view(f: &mut Frame, app: &mut ViewerApp) {
         .map(|v| format!("Protocol: {}", v))
         .unwrap_or_else(|| "Protocol: Unknown".to_string());
     let header_text = format!(
-        "Session: #{} | {} | Packet: {}/{} | Time: {} | View: {}{}{} | [Left/Right/h/l: navigate, Up/Down/k/j/mouse wheel: scroll, Click +/-: expand/collapse JSON, PgUp/PgDn: jump 10, Home/End: first/last, x: view, f: filter, c: compare, Esc: exit compare, q: back]",
+        "Session: #{} | {} | Packet: {}/{} | Time: {} | View: {}{}{} | [Left/Right/h/l: navigate, Up/Down/k/j/mouse wheel: scroll, Click +/-: expand/collapse JSON, PgUp/PgDn: jump 10, Home/End: first/last, x: view, f: filter, c: compare, y: copy packet, Esc: exit compare, q: back]",
         log.session_id,
         version_str,
         packet_num,
@@ -1678,14 +1718,22 @@ fn render_packet_view(f: &mut Frame, app: &mut ViewerApp) {
             String::new()
         };
         
+        // Add copy confirmation message if active
+        let copy_msg = if app.copy_message_frame.is_some() {
+            " | ✓ Copied to clipboard"
+        } else {
+            ""
+        };
+        
         let title_text = format!(
-            "Packet Details ({}) | {}{} | {:.3}s | {} | {}",
+            "Packet Details ({}) | {}{} | {:.3}s | {}{}{}",
             view_type,
             packet_num_str,
             direction_str,
             relative_time_sec,
             packet_name_for_title,
-            scroll_info
+            scroll_info,
+            copy_msg
         );
         
         let details_paragraph = Paragraph::new(visible_lines)
